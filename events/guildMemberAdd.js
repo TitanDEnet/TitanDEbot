@@ -9,22 +9,18 @@ async function createWelcomeImage(member) {
   const canvas = createCanvas(1054, 593);
   const ctx = canvas.getContext('2d');
 
-  // Hintergrundbild laden
   const bg = await loadImage(path.join(__dirname, '../assets/welcome.png'));
   ctx.drawImage(bg, 0, 0, canvas.width, canvas.height);
 
-  // Dunkler Streifen unten für Text
-  ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
-  ctx.fillRect(0, canvas.height - 160, canvas.width, 160);
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
+  ctx.fillRect(0, canvas.height - 180, canvas.width, 180);
 
-  // Profilbild laden
   try {
     const avatarURL = member.user.displayAvatarURL({ extension: 'png', size: 128 });
     const avatar = await loadImage(avatarURL);
-
-    const avatarSize = 100;
+    const avatarSize = 90;
     const avatarX = canvas.width / 2 - avatarSize / 2;
-    const avatarY = canvas.height - 150;
+    const avatarY = canvas.height - 170;
 
     ctx.save();
     ctx.beginPath();
@@ -34,29 +30,31 @@ async function createWelcomeImage(member) {
     ctx.drawImage(avatar, avatarX, avatarY, avatarSize, avatarSize);
     ctx.restore();
 
-    // Weißer Rand ums Profilbild
     ctx.beginPath();
     ctx.arc(avatarX + avatarSize / 2, avatarY + avatarSize / 2, avatarSize / 2 + 3, 0, Math.PI * 2);
     ctx.strokeStyle = '#ffffff';
     ctx.lineWidth = 3;
     ctx.stroke();
-  } catch (e) {
-    console.log('Avatar konnte nicht geladen werden:', e.message);
-  }
+  } catch (e) {}
 
   // Username
-  ctx.font = 'bold 38px Sans';
+  ctx.font = 'bold 36px Sans';
   ctx.fillStyle = '#ffffff';
   ctx.textAlign = 'center';
-  ctx.shadowColor = 'rgba(0,0,0,0.8)';
-  ctx.shadowBlur = 8;
-  ctx.fillText(`${member.user.username}`, canvas.width / 2, canvas.height - 55);
+  ctx.shadowColor = 'rgba(0,0,0,0.9)';
+  ctx.shadowBlur = 10;
+  ctx.fillText(`${member.user.username}`, canvas.width / 2, canvas.height - 65);
 
-  // Subtext mit Member-Anzahl
-  ctx.font = '22px Sans';
-  ctx.fillStyle = '#dddddd';
+  // Subtext Zeile 1
+  ctx.font = '20px Sans';
+  ctx.fillStyle = '#eeeeee';
   const memberCount = member.guild.memberCount;
-  ctx.fillText(`du bist jetzt bei uns gelandet 👥 Mitglied #${memberCount}`, canvas.width / 2, canvas.height - 20);
+  ctx.fillText(`Danke, dass du bei uns gelandet bist! 👥 Mitglied #${memberCount}`, canvas.width / 2, canvas.height - 38);
+
+  // Subtext Zeile 2
+  ctx.font = '17px Sans';
+  ctx.fillStyle = '#ffcc00';
+  ctx.fillText(`⚠️ Bevor du richtig starten kannst, musst du dich verifizieren!`, canvas.width / 2, canvas.height - 12);
 
   return canvas.toBuffer('image/png');
 }
@@ -64,22 +62,21 @@ async function createWelcomeImage(member) {
 module.exports = {
   name: 'guildMemberAdd',
   async execute(member) {
-    // 1. DM schicken
+    // 1. DM
     try {
       await member.send(
-        `👋 Hey **${member.user.username}**! Willkommen auf dem Server!\n\nSchön dass du da bist – schau dich gerne um! 🎉`
+        `👋 Hey **${member.user.username}**! Willkommen auf **${member.guild.name}**!\n\n` +
+        `Danke dass du bei uns gelandet bist! 🎉\n` +
+        `⚠️ **Bitte verifiziere dich**, bevor du richtig starten kannst!`
       );
-    } catch (err) {
-      console.log(`Konnte keine DM an ${member.user.tag} schicken (DMs deaktiviert)`);
-    }
+    } catch {}
 
-    // 2. Welcome-Bild im Image-Channel
+    // 2. Welcome-Bild
     try {
       const imageChannel = member.guild.channels.cache.get(WELCOME_IMAGE_CHANNEL_ID);
       if (imageChannel) {
         const buffer = await createWelcomeImage(member);
         const attachment = new AttachmentBuilder(buffer, { name: 'welcome.png' });
-
         const embed = new EmbedBuilder()
           .setColor(0x2ecc71)
           .setImage('attachment://welcome.png')
@@ -95,17 +92,13 @@ module.exports = {
       console.error('Fehler beim Welcome-Bild:', err);
     }
 
-    // 3. Ping-Channel für 5 Sekunden, dann löschen
+    // 3. Ping für 5 Sek dann löschen
     try {
       const pingChannel = member.guild.channels.cache.get(WELCOME_CHANNEL_ID);
       if (pingChannel) {
         const msg = await pingChannel.send(`🎉 Willkommen <@${member.id}>!`);
-        setTimeout(async () => {
-          try { await msg.delete(); } catch (e) {}
-        }, 5000);
+        setTimeout(async () => { try { await msg.delete(); } catch {} }, 5000);
       }
-    } catch (err) {
-      console.error('Fehler beim Welcome-Ping:', err);
-    }
+    } catch {}
   },
 };
