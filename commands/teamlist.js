@@ -1,13 +1,14 @@
-const { SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits } = require('discord.js');
+const { SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits, AttachmentBuilder } = require('discord.js');
+const path = require('path');
 
 const RANKS = [
-  { key: 'owner', label: '<@&1357776355814801698>', color: 0xFFD700 },
-  { key: 'admin', label: '<@&1357776355814801697>', color: 0xFF4444 },
-  { key: 'projektleitung', label: '<@&1442611414928982238>', color: 0xFF8C00 },
-  { key: 'medialeitung', label: '<@&1476326528391581949>', color: 0xFFD700 },
-  { key: 'sr_supporter', label: '<@&1480553606603210866>', color: 0x4169E1 },
-  { key: 'supporter', label: '<@&1357776355814801695>', color: 0x2ecc71 },
-  { key: 'builder', label: '<@&1357776355814801694>', color: 0x8B4513 },
+  { key: 'owner', label: '<@1357776355814801698>', color: 0xFFD700 },
+  { key: 'admin', label: '<@1357776355814801697>', color: 0xFF4444 },
+  { key: 'projektleitung', label: '<@1442611414928982238>', color: 0xFF8C00 },
+  { key: 'medialeitung', label: '<@1476326528391581949>', color: 0xFFD700 },
+  { key: 'sr_supporter', label: '<@1480553606603210866>', color: 0x4169E1 },
+  { key: 'supporter', label: '<@1357776355814801695>', color: 0x2ecc71 },
+  { key: 'builder', label: '<@1357776355814801694>', color: 0x8B4513 },
 ];
 
 // Teamdaten werden im Speicher gehalten
@@ -41,6 +42,7 @@ async function buildTeamEmbed(guild, data) {
   const embed = new EmbedBuilder()
     .setTitle('👥 TitanDE Team-Übersicht')
     .setColor(0x5865F2)
+    .setImage('attachment://teamlist.png')
     .setFooter({ text: `Letztes Update • ${new Date().toLocaleString('de-DE')}` })
     .setTimestamp();
 
@@ -142,7 +144,8 @@ module.exports = {
         try {
           const ch = await client.channels.fetch(existing.channelId);
           const msg = await ch.messages.fetch(existing.messageId);
-          await msg.edit({ embeds: [embed] });
+          const banner2 = new AttachmentBuilder(path.join(__dirname, '../assets/teamlist.png'), { name: 'teamlist.png' });
+          await msg.edit({ embeds: [embed], files: [banner2] });
           await interaction.editReply('✅ Teamliste aktualisiert!');
           return;
         } catch {}
@@ -160,7 +163,8 @@ module.exports = {
         const ch = await client.channels.fetch(existing.channelId);
         const msg = await ch.messages.fetch(existing.messageId);
         const embed = await buildTeamEmbed(interaction.guild, data);
-        await msg.edit({ embeds: [embed] });
+        const banner3 = new AttachmentBuilder(path.join(__dirname, '../assets/teamlist.png'), { name: 'teamlist.png' });
+        await msg.edit({ embeds: [embed], files: [banner3] });
       } catch {}
     }
   }
