@@ -83,8 +83,8 @@ const { aktiveBewerbungen, bewerbungChannels, FRAGEN } = require('./commands/bew
 client.on('messageCreate', async message => {
   if (message.author.bot) return;
 
-  // Link filter
-  await linkFilter.execute(message, client);
+  // Link filter - nur für Server-Nachrichten
+  if (message.guild) await linkFilter.execute(message, client);
 
   // Bewerbung DM Handler
   if (!message.guild && aktiveBewerbungen.has(message.author.id)) {
