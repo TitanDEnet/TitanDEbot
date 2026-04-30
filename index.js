@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, Collection } = require('discord.js');
+const { Client, GatewayIntentBits, Collection, EmbedBuilder } = require('discord.js');
 const { REST } = require('@discordjs/rest');
 const { Routes } = require('discord-api-types/v10');
 const fs = require('fs');
@@ -75,9 +75,73 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
-// Counting game - message listener
+// Link filter + Counting game + Bewerbung - message listener
+const linkFilter = require('./events/linkFilter');
+const { aktiveBewerbungen, bewerbungChannels, FRAGEN } = require('./commands/bewerbung');
+
 client.on('messageCreate', async message => {
   if (message.author.bot) return;
+
+  // Link filter
+  await linkFilter.execute(message, client);
+
+  // Bewerbung DM Handler
+  if (!message.guild && aktiveBewerbungen.has(message.author.id)) {
+    const bew = aktiveBewerbungen.get(message.author.id);
+    bew.answers.push(message.content);
+    bew.currentQ++;
+
+    if (bew.currentQ < FRAGEN.length) {
+      await message.author.send(
+        `─────────────────────
+**Frage ${bew.currentQ + 1}/${FRAGEN.length}:** ${FRAGEN[bew.currentQ]}`
+      );
+    } else {
+      // Alle Fragen beantwortet - Bewerbung abschicken
+      aktiveBewerbungen.delete(message.author.id);
+
+      const channelId = bewerbungChannels.get(bew.guildId);
+      if (channelId) {
+        try {
+          const channel = await client.channels.fetch(channelId);
+          const embed = new EmbedBuilder()
+            .setTitle(`📋 Neue Supporter-Bewerbung`)
+            .setColor(0x5865F2)
+            .setDescription(`**Bewerber:** ${bew.applicantName}
+**Gestartet von:** ${bew.startedBy}`)
+            .setTimestamp()
+            .setFooter({ text: 'TitanDE Bewerbungs-System' });
+
+          FRAGEN.forEach((frage, i) => {
+            embed.addFields({ name: `${i + 1}. ${frage}`, value: bew.answers[i] || 'Keine Antwort', inline: false });
+          });
+
+          const msg = await channel.send({ embeds: [embed] });
+          await msg.react('✅');
+          await msg.react('❌');
+
+          await message.author.send(
+            `✅ **Deine Bewerbung wurde erfolgreich abgeschickt!**
+
+Das Team wird sie so schnell wie möglich prüfen. Viel Erfolg! 🍀`
+          );
+        } catch (e) {
+          console.error('Bewerbung senden fehlgeschlagen:', e);
+        }
+      }
+    }
+    return;
+  }
+
+  // Vorschlag-Channel Auto-Reaktion
+  const { vorschlagChannels } = require('./commands/vorschlag');
+  const vorschlagChannelId = vorschlagChannels.get(message.guild?.id);
+  if (vorschlagChannelId && message.channel.id === vorschlagChannelId) {
+    try {
+      await message.react('✅');
+      await message.react('❌');
+    } catch (e) { console.log('Reaktion fehlgeschlagen:', e.message); }
+  }
 
   const data = client.countingData.get(message.guild?.id);
   if (!data || message.channel.id !== data.channelId) return;
