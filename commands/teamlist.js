@@ -1,12 +1,13 @@
 const { SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits } = require('discord.js');
 
 const RANKS = [
-  { key: 'owner', label: '👑 Owner', color: 0xFFD700 },
-  { key: 'admin', label: '🔴 Admin', color: 0xFF4444 },
-  { key: 'projektleitung', label: '🟠 Projektleitung', color: 0xFF8C00 },
-  { key: 'medialeitung', label: '🟡 Medialeitung', color: 0xFFD700 },
-  { key: 'sr_supporter', label: '🔵 Sr. Supporter', color: 0x4169E1 },
-  { key: 'supporter', label: '🟢 Supporter', color: 0x2ecc71 },
+  { key: 'owner', label: '<@&1357776355814801698>', color: 0xFFD700 },
+  { key: 'admin', label: '<@&1357776355814801697>', color: 0xFF4444 },
+  { key: 'projektleitung', label: '<@&1442611414928982238>', color: 0xFF8C00 },
+  { key: 'medialeitung', label: '<@&1476326528391581949>', color: 0xFFD700 },
+  { key: 'sr_supporter', label: '<@&1480553606603210866>', color: 0x4169E1 },
+  { key: 'supporter', label: '<@&1357776355814801695>', color: 0x2ecc71 },
+  { key: 'builder', label: '<@&1357776355814801694>', color: 0x8B4513 },
 ];
 
 // Teamdaten werden im Speicher gehalten
@@ -21,6 +22,7 @@ function getTeamData(guildId) {
       medialeitung: [],
       sr_supporter: [],
       supporter: [],
+      builder: [],
     });
   }
   return teamData.get(guildId);
@@ -50,8 +52,8 @@ async function buildTeamEmbed(guild, data) {
       let member = null;
       try { member = await guild.members.fetch(m.userId); } catch {}
       const status = getStatusEmoji(member);
-      const name = member ? `<@${m.userId}>` : m.name;
-      return `${status} ${name}`;
+      const displayName = member ? (member.nickname || member.user.username) : m.name;
+      return `- ${displayName}`;
     }));
 
     embed.addFields({
@@ -85,12 +87,13 @@ module.exports = {
         .setDescription('Rang')
         .setRequired(true)
         .addChoices(
-          { name: '👑 Owner', value: 'owner' },
-          { name: '🔴 Admin', value: 'admin' },
-          { name: '🟠 Projektleitung', value: 'projektleitung' },
-          { name: '🟡 Medialeitung', value: 'medialeitung' },
-          { name: '🔵 Sr. Supporter', value: 'sr_supporter' },
-          { name: '🟢 Supporter', value: 'supporter' },
+          { name: 'Owner', value: 'owner' },
+          { name: 'Admin', value: 'admin' },
+          { name: 'Projektleitung', value: 'projektleitung' },
+          { name: 'Medialeitung', value: 'medialeitung' },
+          { name: 'Sr. Supporter', value: 'sr_supporter' },
+          { name: 'Supporter', value: 'supporter' },
+          { name: 'Builder', value: 'builder' },
         )
       )
     )
