@@ -26,6 +26,7 @@ module.exports = {
   data: new SlashCommandBuilder()
     .setName('bewerbung')
     .setDescription('Bewerbungs-System')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
     .addSubcommand(sub => sub
       .setName('start')
       .setDescription('Startet eine Supporter-Bewerbung für einen User (nur Supporter+)')
@@ -35,7 +36,6 @@ module.exports = {
       .setName('channel')
       .setDescription('Setzt den Channel für Bewerbungen (nur Admins)')
       .addChannelOption(opt => opt.setName('channel').setDescription('Bewerbungs-Channel').setRequired(true))
-      .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
     )
     .addSubcommand(sub => sub
       .setName('status')
