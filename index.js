@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, Collection, EmbedBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, Collection, EmbedBuilder, Partials } = require('discord.js');
 const { REST } = require('@discordjs/rest');
 const { Routes } = require('discord-api-types/v10');
 const fs = require('fs');
@@ -6,6 +6,7 @@ const path = require('path');
 require('dotenv').config();
 
 const client = new Client({
+  partials: [Partials.Channel, Partials.Message],
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildVoiceStates,
