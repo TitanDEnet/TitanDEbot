@@ -6,13 +6,16 @@ const path = require('path');
 require('dotenv').config();
 
 const client = new Client({
-  partials: [Partials.Channel, Partials.Message],
+  partials: [Partials.Channel, Partials.Message, Partials.User],
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.DirectMessages,
+    GatewayIntentBits.DirectMessageTyping,
+    GatewayIntentBits.DirectMessageReactions,
   ],
 });
 
@@ -76,12 +79,19 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
-// Link filter + Counting game + Bewerbung - message listener
+// Link filter + Counting game + Bewerbung + KI - message listener
 const linkFilter = require('./events/linkFilter');
+const kiHandler = require('./events/kiHandler');
 const { aktiveBewerbungen, bewerbungChannels, FRAGEN } = require('./commands/bewerbung');
 
 client.on('messageCreate', async message => {
   if (message.author.bot) return;
+
+  // KI Handler - wenn Bot @mentioned wird
+  if (message.guild && message.mentions.has(client.user)) {
+    await kiHandler.execute(message, client);
+    return;
+  }
 
   // Link filter - nur für Server-Nachrichten
   if (message.guild) await linkFilter.execute(message, client);
