@@ -59,6 +59,10 @@ client.once('ready', async () => {
 const welcomeEvent = require('./events/guildMemberAdd');
 client.on('guildMemberAdd', member => welcomeEvent.execute(member));
 
+// Warteraum Ping
+const warteraumEvent = require('./events/warteraum');
+client.on('voiceStateUpdate', (oldState, newState) => warteraumEvent.execute(oldState, newState));
+
 // Handle slash commands
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
@@ -83,6 +87,7 @@ client.on('interactionCreate', async interaction => {
 const linkFilter = require('./events/linkFilter');
 const kiHandler = require('./events/kiHandler');
 const { aktiveBewerbungen, bewerbungChannels, FRAGEN } = require('./commands/bewerbung');
+const { aktiveMediaBewerbungen, mediaChannels, MEDIA_FRAGEN } = require('./commands/bewerbung-media');
 
 client.on('messageCreate', async message => {
   if (message.author.bot) return;
@@ -139,6 +144,45 @@ Das Team wird sie so schnell wie möglich prüfen. Viel Erfolg! 🍀`
         } catch (e) {
           console.error('Bewerbung senden fehlgeschlagen:', e);
         }
+      }
+    }
+    return;
+  }
+
+  // Media-Bewerbung DM Handler
+  if (!message.guild && aktiveMediaBewerbungen.has(message.author.id)) {
+    const bew = aktiveMediaBewerbungen.get(message.author.id);
+    bew.answers.push(message.content);
+    bew.currentQ++;
+
+    if (bew.currentQ < MEDIA_FRAGEN.length) {
+      await message.author.send(
+        `─────────────────────
+**Frage ${bew.currentQ + 1}/${MEDIA_FRAGEN.length}:** ${MEDIA_FRAGEN[bew.currentQ]}`
+      );
+    } else {
+      aktiveMediaBewerbungen.delete(message.author.id);
+      const channelId = mediaChannels.get(bew.guildId);
+      if (channelId) {
+        try {
+          const channel = await client.channels.fetch(channelId);
+          const embed = new EmbedBuilder()
+            .setTitle('🎬 Neue Media-Bewerbung')
+            .setColor(0xFF69B4)
+            .setDescription(`**Bewerber:** ${bew.applicantName}
+**Gestartet von:** ${bew.startedBy}`)
+            .setTimestamp()
+            .setFooter({ text: 'TitanDE Media-Bewerbung' });
+          MEDIA_FRAGEN.forEach((frage, i) => {
+            embed.addFields({ name: `${i + 1}. ${frage}`, value: bew.answers[i] || 'Keine Antwort', inline: false });
+          });
+          const msg = await channel.send({ embeds: [embed] });
+          await msg.react('✅');
+          await msg.react('❌');
+          await message.author.send('✅ **Deine Media-Bewerbung wurde erfolgreich abgeschickt!**
+
+Das Team wird sie so schnell wie möglich prüfen. Viel Erfolg! 🎬');
+        } catch (e) { console.error('Media-Bewerbung Fehler:', e); }
       }
     }
     return;
