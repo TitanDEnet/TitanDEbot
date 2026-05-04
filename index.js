@@ -179,9 +179,7 @@ Das Team wird sie so schnell wie möglich prüfen. Viel Erfolg! 🍀`
           const msg = await channel.send({ embeds: [embed] });
           await msg.react('✅');
           await msg.react('❌');
-          await message.author.send('✅ **Deine Media-Bewerbung wurde erfolgreich abgeschickt!**
-
-Das Team wird sie so schnell wie möglich prüfen. Viel Erfolg! 🎬');
+          await message.author.send('✅ **Deine Media-Bewerbung wurde erfolgreich abgeschickt!**\n\nDas Team wird sie so schnell wie möglich prüfen. Viel Erfolg! 🎬');
         } catch (e) { console.error('Media-Bewerbung Fehler:', e); }
       }
     }
