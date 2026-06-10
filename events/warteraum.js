@@ -1,22 +1,11 @@
-const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus, StreamType, entersState, getVoiceConnection } = require('@discordjs/voice');
+const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus, StreamType, entersState } = require('@discordjs/voice');
 const path = require('path');
 const fs = require('fs');
 
 const ffmpegPath = require('ffmpeg-static');
 process.env.FFMPEG_PATH = ffmpegPath;
 
-// Opus check
-try {
-  require('opusscript');
-  console.log('✅ Opus: opusscript geladen');
-} catch(e) {
-  try {
-    require('@discordjs/opus');
-    console.log('✅ Opus: @discordjs/opus geladen');
-  } catch(e2) {
-    console.error('❌ KEIN OPUS ENCODER GEFUNDEN - Audio wird nicht funktionieren!');
-  }
-}
+try { require('opusscript'); console.log('✅ Opus: opusscript geladen'); } catch(e) { console.error('❌ KEIN OPUS ENCODER!'); }
 
 const warteraumCounter = new Map();
 const originalNames = new Map();
@@ -29,11 +18,25 @@ async function checkEmpty(guild, warteraumId) {
     if (humanMembers.size === 0) {
       warteraumCounter.set(guild.id, 0);
       const conn = botVoiceConnections.get(guild.id);
-      if (conn) {
-        setTimeout(() => { conn.destroy(); botVoiceConnections.delete(guild.id); }, 2000);
-      }
+      if (conn) { setTimeout(() => { try { conn.destroy(); } catch(e) {} botVoiceConnections.delete(guild.id); }, 2000); }
     }
   } catch (e) {}
+}
+
+async function playAudio(connection, guild, warteraumId) {
+  const player = createAudioPlayer();
+  connection.subscribe(player);
+
+  const audioPath = path.join(__dirname, '../assets/warteraum.mp3');
+  const resource = createAudioResource(fs.createReadStream(audioPath), {
+    inputType: StreamType.Arbitrary,
+  });
+
+  player.play(resource);
+  console.log('🎵 Audio spielt!');
+
+  player.on(AudioPlayerStatus.Idle, () => checkEmpty(guild, warteraumId));
+  player.on('error', err => console.error('❌ Player Error:', err.message));
 }
 
 module.exports = {
@@ -63,42 +66,50 @@ module.exports = {
       } catch (e) {}
 
       if (!botVoiceConnections.has(guild.id)) {
-        try {
-          const connection = joinVoiceChannel({
-            channelId: WARTERAUM_ID,
-            guildId: guild.id,
-            adapterCreator: guild.voiceAdapterCreator,
-            selfDeaf: false,
-          });
-          botVoiceConnections.set(guild.id, connection);
+        let attempts = 0;
+        const maxAttempts = 3;
 
-          await entersState(connection, VoiceConnectionStatus.Ready, 10_000);
-          console.log('✅ Voice Connection Ready!');
+        const tryConnect = async () => {
+          attempts++;
+          console.log(`🔄 Voice-Verbindung Versuch ${attempts}/${maxAttempts}...`);
+          try {
+            const connection = joinVoiceChannel({
+              channelId: WARTERAUM_ID,
+              guildId: guild.id,
+              adapterCreator: guild.voiceAdapterCreator,
+              selfDeaf: false,
+            });
 
-          const player = createAudioPlayer();
-          connection.subscribe(player);
+            botVoiceConnections.set(guild.id, connection);
 
-          const audioPath = path.join(__dirname, '../assets/warteraum.mp3');
-          const resource = createAudioResource(fs.createReadStream(audioPath), {
-            inputType: StreamType.Arbitrary,
-          });
+            connection.on(VoiceConnectionStatus.Disconnected, async () => {
+              try {
+                await Promise.race([
+                  entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
+                  entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
+                ]);
+              } catch {
+                connection.destroy();
+                botVoiceConnections.delete(guild.id);
+              }
+            });
 
-          player.play(resource);
-          console.log('▶️ Player.play() aufgerufen');
+            await entersState(connection, VoiceConnectionStatus.Ready, 15_000);
+            console.log('✅ Voice Connected!');
+            await playAudio(connection, guild, WARTERAUM_ID);
 
-          player.on(AudioPlayerStatus.Playing, () => console.log('🎵 AudioPlayerStatus: Playing'));
-          player.on(AudioPlayerStatus.Idle, () => {
-            console.log('⏹️ AudioPlayerStatus: Idle');
-            checkEmpty(guild, WARTERAUM_ID);
-          });
-          player.on('error', err => console.error('❌ Player Error:', err.message, err.resource?.metadata));
-          connection.on(VoiceConnectionStatus.Disconnected, () => {
-            console.log('🔌 Voice Disconnected');
+          } catch (e) {
+            console.error(`❌ Versuch ${attempts} fehlgeschlagen:`, e.message);
             botVoiceConnections.delete(guild.id);
-          });
-        } catch (e) {
-          console.error('❌ Voice Fehler:', e.message);
-        }
+            if (attempts < maxAttempts) {
+              setTimeout(tryConnect, 3000);
+            } else {
+              console.error('❌ Alle Versuche fehlgeschlagen – Audio nicht möglich');
+            }
+          }
+        };
+
+        tryConnect();
       }
     }
 
