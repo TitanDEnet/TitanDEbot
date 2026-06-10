@@ -1,6 +1,7 @@
-const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus } = require('@discordjs/voice');
+const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus, StreamType } = require('@discordjs/voice');
 const path = require('path');
 const fs = require('fs');
+const { createReadStream } = require('fs');
 
 const warteraumCounter = new Map();
 const originalNames = new Map();
@@ -71,18 +72,20 @@ module.exports = {
           const audioPath = path.join(__dirname, '../assets/warteraum.mp3');
           console.log('Audio Pfad:', audioPath, '| Existiert:', fs.existsSync(audioPath));
 
-          const resource = createAudioResource(audioPath, {
+          // ffmpeg-static explizit setzen
+          process.env.FFMPEG_PATH = require('ffmpeg-static');
+
+          const resource = createAudioResource(createReadStream(audioPath), {
+            inputType: StreamType.Arbitrary,
             inlineVolume: true,
           });
-          resource.volume?.setVolume(1);
+
           player.play(resource);
 
           player.on(AudioPlayerStatus.Playing, () => console.log('✅ Audio spielt!'));
-          player.on(AudioPlayerStatus.Idle, () => {
-            console.log('Audio fertig');
-            checkEmpty(guild, WARTERAUM_ID);
-          });
+          player.on(AudioPlayerStatus.Idle, () => checkEmpty(guild, WARTERAUM_ID));
           player.on('error', err => console.error('❌ Audio Fehler:', err.message));
+
           connection.on(VoiceConnectionStatus.Disconnected, () => {
             botVoiceConnections.delete(guild.id);
           });
