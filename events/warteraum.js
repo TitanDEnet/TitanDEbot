@@ -1,5 +1,6 @@
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus } = require('@discordjs/voice');
 const path = require('path');
+const fs = require('fs');
 
 const warteraumCounter = new Map();
 const originalNames = new Map();
@@ -13,8 +14,10 @@ async function checkEmpty(guild, warteraumId) {
       warteraumCounter.set(guild.id, 0);
       const connection = botVoiceConnections.get(guild.id);
       if (connection) {
-        connection.destroy();
-        botVoiceConnections.delete(guild.id);
+        setTimeout(() => {
+          connection.destroy();
+          botVoiceConnections.delete(guild.id);
+        }, 2000);
       }
     }
   } catch (e) {}
@@ -57,21 +60,35 @@ module.exports = {
             channelId: WARTERAUM_ID,
             guildId: guild.id,
             adapterCreator: guild.voiceAdapterCreator,
+            selfDeaf: false,
           });
 
           botVoiceConnections.set(guild.id, connection);
+
           const player = createAudioPlayer();
           connection.subscribe(player);
 
-          const resource = createAudioResource(path.join(__dirname, '../assets/warteraum.mp3'));
+          const audioPath = path.join(__dirname, '../assets/warteraum.mp3');
+          console.log('Audio Pfad:', audioPath, '| Existiert:', fs.existsSync(audioPath));
+
+          const resource = createAudioResource(audioPath, {
+            inlineVolume: true,
+          });
+          resource.volume?.setVolume(1);
           player.play(resource);
 
-          player.on(AudioPlayerStatus.Idle, () => checkEmpty(guild, WARTERAUM_ID));
-          player.on('error', err => console.error('Audio Fehler:', err.message));
-          connection.on(VoiceConnectionStatus.Disconnected, () => botVoiceConnections.delete(guild.id));
+          player.on(AudioPlayerStatus.Playing, () => console.log('✅ Audio spielt!'));
+          player.on(AudioPlayerStatus.Idle, () => {
+            console.log('Audio fertig');
+            checkEmpty(guild, WARTERAUM_ID);
+          });
+          player.on('error', err => console.error('❌ Audio Fehler:', err.message));
+          connection.on(VoiceConnectionStatus.Disconnected, () => {
+            botVoiceConnections.delete(guild.id);
+          });
         }
       } catch (e) {
-        console.error('Voice Fehler:', e.message);
+        console.error('❌ Voice Fehler:', e.message);
       }
     }
 
