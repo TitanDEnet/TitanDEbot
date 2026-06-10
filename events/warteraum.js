@@ -1,10 +1,22 @@
-const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus, StreamType } = require('@discordjs/voice');
+const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus, StreamType, entersState, getVoiceConnection } = require('@discordjs/voice');
 const path = require('path');
 const fs = require('fs');
 
-// ffmpeg-static path explizit setzen BEVOR @discordjs/voice es sucht
 const ffmpegPath = require('ffmpeg-static');
 process.env.FFMPEG_PATH = ffmpegPath;
+
+// Opus check
+try {
+  require('opusscript');
+  console.log('✅ Opus: opusscript geladen');
+} catch(e) {
+  try {
+    require('@discordjs/opus');
+    console.log('✅ Opus: @discordjs/opus geladen');
+  } catch(e2) {
+    console.error('❌ KEIN OPUS ENCODER GEFUNDEN - Audio wird nicht funktionieren!');
+  }
+}
 
 const warteraumCounter = new Map();
 const originalNames = new Map();
@@ -60,6 +72,9 @@ module.exports = {
           });
           botVoiceConnections.set(guild.id, connection);
 
+          await entersState(connection, VoiceConnectionStatus.Ready, 10_000);
+          console.log('✅ Voice Connection Ready!');
+
           const player = createAudioPlayer();
           connection.subscribe(player);
 
@@ -68,20 +83,19 @@ module.exports = {
             inputType: StreamType.Arbitrary,
           });
 
-          // Warten bis Verbindung ready
-          await new Promise((resolve) => {
-            const { VoiceConnectionStatus, entersState } = require('@discordjs/voice');
-            entersState(connection, VoiceConnectionStatus.Ready, 10_000)
-              .then(resolve)
-              .catch(resolve);
-          });
-
           player.play(resource);
-          console.log('✅ Audio gestartet mit ffmpeg:', ffmpegPath);
+          console.log('▶️ Player.play() aufgerufen');
 
-          player.on(AudioPlayerStatus.Idle, () => checkEmpty(guild, WARTERAUM_ID));
-          player.on('error', err => console.error('❌ Player Fehler:', err.message));
-          connection.on(VoiceConnectionStatus.Disconnected, () => botVoiceConnections.delete(guild.id));
+          player.on(AudioPlayerStatus.Playing, () => console.log('🎵 AudioPlayerStatus: Playing'));
+          player.on(AudioPlayerStatus.Idle, () => {
+            console.log('⏹️ AudioPlayerStatus: Idle');
+            checkEmpty(guild, WARTERAUM_ID);
+          });
+          player.on('error', err => console.error('❌ Player Error:', err.message, err.resource?.metadata));
+          connection.on(VoiceConnectionStatus.Disconnected, () => {
+            console.log('🔌 Voice Disconnected');
+            botVoiceConnections.delete(guild.id);
+          });
         } catch (e) {
           console.error('❌ Voice Fehler:', e.message);
         }
