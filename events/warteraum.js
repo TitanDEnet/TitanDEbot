@@ -1,7 +1,10 @@
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus, StreamType } = require('@discordjs/voice');
 const path = require('path');
 const fs = require('fs');
-const { createReadStream } = require('fs');
+
+// ffmpeg-static path explizit setzen BEVOR @discordjs/voice es sucht
+const ffmpegPath = require('ffmpeg-static');
+process.env.FFMPEG_PATH = ffmpegPath;
 
 const warteraumCounter = new Map();
 const originalNames = new Map();
@@ -13,12 +16,9 @@ async function checkEmpty(guild, warteraumId) {
     const humanMembers = channel.members.filter(m => !m.user.bot);
     if (humanMembers.size === 0) {
       warteraumCounter.set(guild.id, 0);
-      const connection = botVoiceConnections.get(guild.id);
-      if (connection) {
-        setTimeout(() => {
-          connection.destroy();
-          botVoiceConnections.delete(guild.id);
-        }, 2000);
+      const conn = botVoiceConnections.get(guild.id);
+      if (conn) {
+        setTimeout(() => { conn.destroy(); botVoiceConnections.delete(guild.id); }, 2000);
       }
     }
   } catch (e) {}
@@ -37,65 +37,57 @@ module.exports = {
     const PING_ROLE_ID = config?.pingRoleId || '1500864898517958656';
     const guild = newState.guild;
 
-    // Jemand betritt Warteraum
     if (newState.channelId === WARTERAUM_ID && oldState.channelId !== WARTERAUM_ID) {
       const member = newState.member;
-
       const current = (warteraumCounter.get(guild.id) || 0) + 1;
       warteraumCounter.set(guild.id, current);
 
       originalNames.set(member.id, member.nickname || member.user.username);
-      try {
-        await member.setNickname(`[${current}] ${member.user.username}`);
-      } catch (e) {}
+      try { await member.setNickname(`[${current}] ${member.user.username}`); } catch (e) {}
 
       try {
         const pingChannel = await guild.channels.fetch(PING_CHANNEL_ID);
         await pingChannel.send(`🔔 <@&${PING_ROLE_ID}> **${member.user.username}** wartet als **[${current}]** im Warteraum!`);
       } catch (e) {}
 
-      // Audio abspielen
-      try {
-        if (!botVoiceConnections.has(guild.id)) {
+      if (!botVoiceConnections.has(guild.id)) {
+        try {
           const connection = joinVoiceChannel({
             channelId: WARTERAUM_ID,
             guildId: guild.id,
             adapterCreator: guild.voiceAdapterCreator,
             selfDeaf: false,
           });
-
           botVoiceConnections.set(guild.id, connection);
 
           const player = createAudioPlayer();
           connection.subscribe(player);
 
           const audioPath = path.join(__dirname, '../assets/warteraum.mp3');
-          console.log('Audio Pfad:', audioPath, '| Existiert:', fs.existsSync(audioPath));
-
-          // ffmpeg-static explizit setzen
-          process.env.FFMPEG_PATH = require('ffmpeg-static');
-
-          const resource = createAudioResource(createReadStream(audioPath), {
+          const resource = createAudioResource(fs.createReadStream(audioPath), {
             inputType: StreamType.Arbitrary,
-            inlineVolume: true,
+          });
+
+          // Warten bis Verbindung ready
+          await new Promise((resolve) => {
+            const { VoiceConnectionStatus, entersState } = require('@discordjs/voice');
+            entersState(connection, VoiceConnectionStatus.Ready, 10_000)
+              .then(resolve)
+              .catch(resolve);
           });
 
           player.play(resource);
+          console.log('✅ Audio gestartet mit ffmpeg:', ffmpegPath);
 
-          player.on(AudioPlayerStatus.Playing, () => console.log('✅ Audio spielt!'));
           player.on(AudioPlayerStatus.Idle, () => checkEmpty(guild, WARTERAUM_ID));
-          player.on('error', err => console.error('❌ Audio Fehler:', err.message));
-
-          connection.on(VoiceConnectionStatus.Disconnected, () => {
-            botVoiceConnections.delete(guild.id);
-          });
+          player.on('error', err => console.error('❌ Player Fehler:', err.message));
+          connection.on(VoiceConnectionStatus.Disconnected, () => botVoiceConnections.delete(guild.id));
+        } catch (e) {
+          console.error('❌ Voice Fehler:', e.message);
         }
-      } catch (e) {
-        console.error('❌ Voice Fehler:', e.message);
       }
     }
 
-    // Jemand verlässt Warteraum
     if (oldState.channelId === WARTERAUM_ID && newState.channelId !== WARTERAUM_ID) {
       const member = oldState.member;
       const original = originalNames.get(member.id);
