@@ -1,9 +1,7 @@
 FROM node:20-bullseye-slim
 
-# ffmpeg und opus installieren
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --fix-missing \
     ffmpeg \
-    libopus-dev \
     python3 \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
