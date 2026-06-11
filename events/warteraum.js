@@ -1,11 +1,12 @@
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus, StreamType, entersState } = require('@discordjs/voice');
-const path = require('path');
-const fs = require('fs');
+const ytdl = require('@distube/ytdl-core');
 
 const ffmpegPath = require('ffmpeg-static');
 process.env.FFMPEG_PATH = ffmpegPath;
 
 try { require('opusscript'); console.log('✅ Opus: opusscript geladen'); } catch(e) { console.error('❌ KEIN OPUS ENCODER!'); }
+
+const WARTERAUM_AUDIO_URL = 'https://youtu.be/2Vk9n0jQSOM';
 
 const warteraumCounter = new Map();
 const originalNames = new Map();
@@ -23,20 +24,29 @@ async function checkEmpty(guild, warteraumId) {
   } catch (e) {}
 }
 
-async function playAudio(connection, guild, warteraumId) {
-  const player = createAudioPlayer();
-  connection.subscribe(player);
+async function playYouTube(connection, guild, warteraumId) {
+  try {
+    const player = createAudioPlayer();
+    connection.subscribe(player);
 
-  const audioPath = path.join(__dirname, '../assets/warteraum.mp3');
-  const resource = createAudioResource(fs.createReadStream(audioPath), {
-    inputType: StreamType.Arbitrary,
-  });
+    const stream = ytdl(WARTERAUM_AUDIO_URL, {
+      filter: 'audioonly',
+      quality: 'highestaudio',
+      highWaterMark: 1 << 25,
+    });
 
-  player.play(resource);
-  console.log('🎵 Audio spielt!');
+    const resource = createAudioResource(stream, {
+      inputType: StreamType.Arbitrary,
+    });
 
-  player.on(AudioPlayerStatus.Idle, () => checkEmpty(guild, warteraumId));
-  player.on('error', err => console.error('❌ Player Error:', err.message));
+    player.play(resource);
+    console.log('🎵 YouTube Audio spielt!');
+
+    player.on(AudioPlayerStatus.Idle, () => checkEmpty(guild, warteraumId));
+    player.on('error', err => console.error('❌ Player Error:', err.message));
+  } catch (e) {
+    console.error('❌ YouTube Fehler:', e.message);
+  }
 }
 
 module.exports = {
@@ -66,50 +76,36 @@ module.exports = {
       } catch (e) {}
 
       if (!botVoiceConnections.has(guild.id)) {
-        let attempts = 0;
-        const maxAttempts = 3;
+        try {
+          const connection = joinVoiceChannel({
+            channelId: WARTERAUM_ID,
+            guildId: guild.id,
+            adapterCreator: guild.voiceAdapterCreator,
+            selfDeaf: false,
+          });
 
-        const tryConnect = async () => {
-          attempts++;
-          console.log(`🔄 Voice-Verbindung Versuch ${attempts}/${maxAttempts}...`);
-          try {
-            const connection = joinVoiceChannel({
-              channelId: WARTERAUM_ID,
-              guildId: guild.id,
-              adapterCreator: guild.voiceAdapterCreator,
-              selfDeaf: false,
-            });
+          botVoiceConnections.set(guild.id, connection);
 
-            botVoiceConnections.set(guild.id, connection);
-
-            connection.on(VoiceConnectionStatus.Disconnected, async () => {
-              try {
-                await Promise.race([
-                  entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
-                  entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
-                ]);
-              } catch {
-                connection.destroy();
-                botVoiceConnections.delete(guild.id);
-              }
-            });
-
-            await entersState(connection, VoiceConnectionStatus.Ready, 15_000);
-            console.log('✅ Voice Connected!');
-            await playAudio(connection, guild, WARTERAUM_ID);
-
-          } catch (e) {
-            console.error(`❌ Versuch ${attempts} fehlgeschlagen:`, e.message);
-            botVoiceConnections.delete(guild.id);
-            if (attempts < maxAttempts) {
-              setTimeout(tryConnect, 3000);
-            } else {
-              console.error('❌ Alle Versuche fehlgeschlagen – Audio nicht möglich');
+          connection.on(VoiceConnectionStatus.Disconnected, async () => {
+            try {
+              await Promise.race([
+                entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
+                entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
+              ]);
+            } catch {
+              connection.destroy();
+              botVoiceConnections.delete(guild.id);
             }
-          }
-        };
+          });
 
-        tryConnect();
+          await entersState(connection, VoiceConnectionStatus.Ready, 15_000);
+          console.log('✅ Voice Connected!');
+          await playYouTube(connection, guild, WARTERAUM_ID);
+
+        } catch (e) {
+          console.error('❌ Voice Fehler:', e.message);
+          botVoiceConnections.delete(guild.id);
+        }
       }
     }
 
