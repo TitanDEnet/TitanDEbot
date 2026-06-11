@@ -1,51 +1,13 @@
-const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus, StreamType, entersState } = require('@discordjs/voice');
-const ytdl = require('@distube/ytdl-core');
+const warteraumMembers = new Map(); // guildId -> [{ userId, username }]
+const originalNames = new Map(); // userId -> originalNickname
+const gepingt = new Map(); // guildId -> boolean
 
-const ffmpegPath = require('ffmpeg-static');
-process.env.FFMPEG_PATH = ffmpegPath;
-
-try { require('opusscript'); console.log('✅ Opus: opusscript geladen'); } catch(e) { console.error('❌ KEIN OPUS ENCODER!'); }
-
-const WARTERAUM_AUDIO_URL = 'https://youtu.be/2Vk9n0jQSOM';
-
-const warteraumCounter = new Map();
-const originalNames = new Map();
-const botVoiceConnections = new Map();
-
-async function checkEmpty(guild, warteraumId) {
-  try {
-    const channel = await guild.channels.fetch(warteraumId);
-    const humanMembers = channel.members.filter(m => !m.user.bot);
-    if (humanMembers.size === 0) {
-      warteraumCounter.set(guild.id, 0);
-      const conn = botVoiceConnections.get(guild.id);
-      if (conn) { setTimeout(() => { try { conn.destroy(); } catch(e) {} botVoiceConnections.delete(guild.id); }, 2000); }
-    }
-  } catch (e) {}
-}
-
-async function playYouTube(connection, guild, warteraumId) {
-  try {
-    const player = createAudioPlayer();
-    connection.subscribe(player);
-
-    const stream = ytdl(WARTERAUM_AUDIO_URL, {
-      filter: 'audioonly',
-      quality: 'highestaudio',
-      highWaterMark: 1 << 25,
-    });
-
-    const resource = createAudioResource(stream, {
-      inputType: StreamType.Arbitrary,
-    });
-
-    player.play(resource);
-    console.log('🎵 YouTube Audio spielt!');
-
-    player.on(AudioPlayerStatus.Idle, () => checkEmpty(guild, warteraumId));
-    player.on('error', err => console.error('❌ Player Error:', err.message));
-  } catch (e) {
-    console.error('❌ YouTube Fehler:', e.message);
+async function updateNicknames(guild, members) {
+  for (let i = 0; i < members.length; i++) {
+    try {
+      const member = await guild.members.fetch(members[i].userId);
+      await member.setNickname(`[${i + 1}] ${members[i].username}`);
+    } catch (e) {}
   }
 }
 
@@ -62,61 +24,56 @@ module.exports = {
     const PING_ROLE_ID = config?.pingRoleId || '1500864898517958656';
     const guild = newState.guild;
 
+    if (!warteraumMembers.has(guild.id)) warteraumMembers.set(guild.id, []);
+    const members = warteraumMembers.get(guild.id);
+
+    // Jemand betritt Warteraum
     if (newState.channelId === WARTERAUM_ID && oldState.channelId !== WARTERAUM_ID) {
       const member = newState.member;
-      const current = (warteraumCounter.get(guild.id) || 0) + 1;
-      warteraumCounter.set(guild.id, current);
+      if (member.user.bot) return;
 
+      // Originalnamen merken
       originalNames.set(member.id, member.nickname || member.user.username);
-      try { await member.setNickname(`[${current}] ${member.user.username}`); } catch (e) {}
 
-      try {
-        const pingChannel = await guild.channels.fetch(PING_CHANNEL_ID);
-        await pingChannel.send(`🔔 <@&${PING_ROLE_ID}> **${member.user.username}** wartet als **[${current}]** im Warteraum!`);
-      } catch (e) {}
+      // Zur Liste hinzufügen
+      members.push({ userId: member.id, username: member.user.username });
 
-      if (!botVoiceConnections.has(guild.id)) {
+      // Nicknames aktualisieren
+      await updateNicknames(guild, members);
+
+      // Nur pingen wenn noch niemand drin war
+      if (!gepingt.get(guild.id)) {
         try {
-          const connection = joinVoiceChannel({
-            channelId: WARTERAUM_ID,
-            guildId: guild.id,
-            adapterCreator: guild.voiceAdapterCreator,
-            selfDeaf: false,
-          });
-
-          botVoiceConnections.set(guild.id, connection);
-
-          connection.on(VoiceConnectionStatus.Disconnected, async () => {
-            try {
-              await Promise.race([
-                entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
-                entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
-              ]);
-            } catch {
-              connection.destroy();
-              botVoiceConnections.delete(guild.id);
-            }
-          });
-
-          await entersState(connection, VoiceConnectionStatus.Ready, 15_000);
-          console.log('✅ Voice Connected!');
-          await playYouTube(connection, guild, WARTERAUM_ID);
-
-        } catch (e) {
-          console.error('❌ Voice Fehler:', e.message);
-          botVoiceConnections.delete(guild.id);
-        }
+          const pingChannel = await guild.channels.fetch(PING_CHANNEL_ID);
+          await pingChannel.send(`🔔 <@&${PING_ROLE_ID}> **${member.user.username}** wartet im Warteraum!`);
+          gepingt.set(guild.id, true);
+        } catch (e) {}
       }
     }
 
+    // Jemand verlässt Warteraum
     if (oldState.channelId === WARTERAUM_ID && newState.channelId !== WARTERAUM_ID) {
       const member = oldState.member;
+      if (member.user.bot) return;
+
+      // Aus Liste entfernen
+      const index = members.findIndex(m => m.userId === member.id);
+      if (index !== -1) members.splice(index, 1);
+
+      // Nickname zurücksetzen
       const original = originalNames.get(member.id);
       try {
         await member.setNickname(original === member.user.username ? null : original);
         originalNames.delete(member.id);
       } catch (e) {}
-      checkEmpty(guild, WARTERAUM_ID);
+
+      // Nummern neu vergeben
+      await updateNicknames(guild, members);
+
+      // Wenn Channel leer → Ping-Flag zurücksetzen
+      if (members.length === 0) {
+        gepingt.set(guild.id, false);
+      }
     }
   },
 };
