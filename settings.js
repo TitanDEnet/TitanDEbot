@@ -61,6 +61,128 @@ export function getAiDiaryChannel(g) { return load()[g]?.aiDiaryChannel || null;
 export function setAiDiaryChannel(g, c) { setKey(g, 'aiDiaryChannel', c); }
 export function getAiFunMode(g) { return !!load()[g]?.aiFunMode; }
 export function setAiFunMode(g, v) { setKey(g, 'aiFunMode', !!v); }
+
+// ---- Bot-Sprache pro Server ----
+export const BOT_LANGS = { de: 'Deutsch', en: 'English', es: 'Español', fr: 'Français' };
+export function getBotLang(g) { const l = load()[g]?.botLang; return BOT_LANGS[l] ? l : 'de'; }
+export function setBotLang(g, l) { setKey(g, 'botLang', BOT_LANGS[l] ? l : 'de'); }
+
+// ---- Dashboard Pop-Up (global, einmal pro User) ----
+export function getPopup() {
+  const p = loadGlobal().popup;
+  return p && p.active ? p : null;
+}
+export function setPopup(title, message) {
+  const g = loadGlobal();
+  g.popup = { id: Date.now(), title: (title || '').slice(0, 120), message: (message || '').slice(0, 1500), active: true };
+  saveGlobal(g);
+  return g.popup;
+}
+export function clearPopup() {
+  const g = loadGlobal();
+  if (g.popup) { g.popup.active = false; saveGlobal(g); }
+}
+export function hasSeenPopup(userId) {
+  const g = loadGlobal();
+  if (!g.popup || !g.popup.active) return true;
+  return (g.popupSeen || {})[userId] === g.popup.id;
+}
+export function markPopupSeen(userId) {
+  const g = loadGlobal();
+  if (!g.popup) return;
+  const seen = g.popupSeen || {};
+  seen[userId] = g.popup.id;
+  g.popupSeen = seen; saveGlobal(g);
+}
+
+// ---- Dashboard-Aktivität (Logins / online) ----
+export function recordDashLogin(userId) {
+  const g = loadGlobal();
+  const list = g.dashLogins || [];
+  list.push({ u: userId, ts: Date.now() });
+  g.dashLogins = list.slice(-5000);
+  const seen = g.dashSeen || {}; seen[userId] = Date.now(); g.dashSeen = seen;
+  saveGlobal(g);
+}
+export function touchDashSeen(userId) {
+  const g = loadGlobal();
+  const seen = g.dashSeen || {};
+  seen[userId] = Date.now(); g.dashSeen = seen;
+  saveGlobal(g);
+}
+export function getDashStats() {
+  const g = loadGlobal();
+  const now = Date.now();
+  const seen = g.dashSeen || {};
+  const logins = g.dashLogins || [];
+  const onlineNow = Object.values(seen).filter((ts) => now - ts < 5 * 60000).length;
+  const in24 = logins.filter((x) => now - x.ts < 86400000);
+  const in7 = logins.filter((x) => now - x.ts < 7 * 86400000);
+  const uniq = (arr) => new Set(arr.map((x) => x.u)).size;
+  const perDay = [];
+  for (let d = 6; d >= 0; d--) {
+    const start = new Date(now - d * 86400000); start.setHours(0, 0, 0, 0);
+    const end = start.getTime() + 86400000;
+    perDay.push({ day: start.toISOString().slice(0, 10), count: logins.filter((x) => x.ts >= start.getTime() && x.ts < end).length });
+  }
+  return { onlineNow, logins24h: in24.length, users24h: uniq(in24), logins7d: in7.length, users7d: uniq(in7), totalUsers: uniq(logins), perDay };
+}
+
+// ---- Giveaways (persistent, global) ----
+export function getGiveaways() { return loadGlobal().giveaways || {}; }
+export function getGiveaway(id) { return (loadGlobal().giveaways || {})[id] || null; }
+export function setGiveaway(id, obj) {
+  const g = loadGlobal(); const gv = g.giveaways || {};
+  gv[id] = obj; g.giveaways = gv; saveGlobal(g);
+}
+export function removeGiveaway(id) {
+  const g = loadGlobal(); const gv = g.giveaways || {};
+  delete gv[id]; g.giveaways = gv; saveGlobal(g);
+}
+
+// ---- Partner (global) ----
+export function getPartners() { return loadGlobal().partners || []; }
+export function addPartner({ name, img, url }) {
+  const g = loadGlobal(); const list = g.partners || [];
+  const p = { id: 'p' + Date.now().toString(36) + Math.floor(Math.random() * 1000), name: (name || '').slice(0, 60), img: (img || '').slice(0, 400), url: (url || '').slice(0, 400), local: false, imgType: null };
+  list.push(p);
+  g.partners = list.slice(0, 100); saveGlobal(g);
+  return p;
+}
+export function setPartnerLocal(id, imgType) {
+  const g = loadGlobal(); const p = (g.partners || []).find((x) => x.id === id);
+  if (p) { p.local = true; p.imgType = imgType; saveGlobal(g); }
+}
+export function removePartner(id) {
+  const g = loadGlobal(); g.partners = (g.partners || []).filter((p) => p.id !== id); saveGlobal(g);
+}
+
+// ---- Voice-XP (pro Server) ----
+export function getVoiceXp(g) { return !!load()[g]?.voiceXp; }
+export function setVoiceXp(g, v) { setKey(g, 'voiceXp', !!v); }
+
+// ---- Warteraum (pro Server) ----
+export function getWarteraum(g) { return load()[g]?.warteraum || null; }
+export function setWarteraum(g, obj) { setKey(g, 'warteraum', obj); }
+
+// ---- Shop (pro Server) ----
+export function getShop(g) { return load()[g]?.shop || []; }
+export function addShopItem(g, { name, price, roleId, desc }) {
+  const d = load(); const gg = d[g] || {}; const list = gg.shop || [];
+  list.push({ id: 's' + Date.now().toString(36) + Math.floor(Math.random() * 1000), name: (name || '').slice(0, 60), price: Math.max(0, parseInt(price) || 0), roleId: roleId || null, desc: (desc || '').slice(0, 120) });
+  gg.shop = list.slice(0, 50); d[g] = gg; save(d);
+}
+export function removeShopItem(g, id) {
+  const d = load(); const gg = d[g] || {}; gg.shop = (gg.shop || []).filter((x) => x.id !== id); d[g] = gg; save(d);
+}
+export function getShopItem(g, id) { return (load()[g]?.shop || []).find((x) => x.id === id) || null; }
+
+// ---- Stripe: verarbeitete Checkout-Sessions (gegen Doppel-Gutschrift) ----
+export function hasStripeSession(id) { return (loadGlobal().stripeSessions || []).includes(id); }
+export function markStripeSession(id) {
+  const g = loadGlobal(); const list = g.stripeSessions || [];
+  if (!list.includes(id)) { list.push(id); g.stripeSessions = list.slice(-5000); saveGlobal(g); }
+}
 export function getAiDiaryLast(g) { return load()[g]?.aiDiaryLast || null; }
 export function setAiDiaryLast(g, d) { setKey(g, 'aiDiaryLast', d); }
 
@@ -503,6 +625,15 @@ export function addFreeGameSeen(g, id) {
 // ---- Autorole ----
 export function getAutoRole(g) { return load()[g]?.autoRole || null; }
 export function setAutoRole(g, r) { setKey(g, 'autoRole', r); }
+
+// ---- Mehrfach-Rollen: gespeicherter Wert kann "id" oder "id1,id2,..." sein ----
+export function roleIds(v) {
+  if (!v) return [];
+  return String(v).split(',').map((s) => s.trim()).filter(Boolean);
+}
+export function rolePings(v) {
+  return roleIds(v).map((id) => `<@&${id}>`).join(' ');
+}
 
 // ---- Temp-Voice ----
 export function getTempVoiceChannel(g) { return load()[g]?.tempVoiceChannel || null; }

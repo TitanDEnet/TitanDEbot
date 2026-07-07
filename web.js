@@ -4,6 +4,28 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import Stripe from 'stripe';
+
+const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
+const PREMIUM_PRICE_CENTS = 399; // 3,99 €
+const PARTNER_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'data', 'partners');
+
+// Lädt ein Partner-Bild einmalig herunter und speichert es lokal (gegen Hotlink-/Mixed-Content-Probleme)
+async function cachePartnerImage(id, url) {
+  try {
+    if (!/^https?:\/\//i.test(url)) return false;
+    const r = await fetch(url, { redirect: 'follow' });
+    if (!r.ok) return false;
+    const ct = (r.headers.get('content-type') || '').split(';')[0].trim();
+    if (!ct.startsWith('image/')) return false;
+    const buf = Buffer.from(await r.arrayBuffer());
+    if (buf.length > 6 * 1024 * 1024) return false; // max 6 MB
+    fs.mkdirSync(PARTNER_DIR, { recursive: true });
+    fs.writeFileSync(path.join(PARTNER_DIR, id), buf);
+    setPartnerLocal(id, ct);
+    return true;
+  } catch { return false; }
+}
 import { ChannelType } from 'discord.js';
 import {
   getWelcomeChannel, setWelcomeChannel,
@@ -20,6 +42,10 @@ import {
   getAiChat, setAiChat, getAiDiary, setAiDiary, getAiImitate, setAiImitate,
   getAiChatChannel, setAiChatChannel, getAiDiaryChannel, setAiDiaryChannel,
   getAiFunMode, setAiFunMode,
+  getBotLang, setBotLang, BOT_LANGS,
+  getPopup, setPopup, clearPopup, hasSeenPopup, markPopupSeen,
+  recordDashLogin, touchDashSeen, getDashStats,
+  getPartners, addPartner, removePartner, setPartnerLocal,
   listPremiumKeys, createPremiumKey, deactivatePremiumKey,
   listPremiumSubs, isPremium, getPremiumExpiry, grantPremium, revokePremium, redeemPremiumKey,
   getPremFeature, setPremFeature,
@@ -32,6 +58,10 @@ import {
   getLinkEnabled, setLinkEnabled,
   getCountingChannel, setCountingChannel, getCountingOpts, setCountingOpts,
   getLevelupEnabled, setLevelupEnabled, getLevelupChannel, setLevelupChannel,
+  getVoiceXp, setVoiceXp,
+  getWarteraum, setWarteraum,
+  getShop, addShopItem, removeShopItem,
+  hasStripeSession, markStripeSession,
   getLogChannel, setLogChannel, getLogEvents, setLogEvents,
   getTwitchLogin, getTwitchImage, getTwitchName, setTwitchAccount, clearTwitchAccount,
   getTwitchChannel, setTwitchChannel, getTwitchRole, setTwitchRole,
@@ -41,6 +71,7 @@ import {
   isFeatureEnabled, setFeatureEnabled,
   getTicketRole, setTicketRole,
   getAutoRole, setAutoRole,
+  roleIds,
   getTempVoiceChannel, setTempVoiceChannel, getTempVoicePanel, setTempVoicePanel,
   getAnnouncements, addAnnouncement, removeAnnouncement,
   getModLogChannel, setModLogChannel,
@@ -58,7 +89,6 @@ import { CHAOS_EVENTS, chaosReconcile } from './chaos.js';
 import { getMetrics } from './metrics.js';
 import { moodStateOf, moodBar } from './mood.js';
 import { summarizeStats } from './statstrack.js';
-import * as Canvas from './canvas.js';
 import { aiConfigured } from './ai.js';
 import { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
 
@@ -83,17 +113,17 @@ const T = {
     back: 'zurück', save: 'Speichern', saved: 'Gespeichert!', noChannel: '— kein Channel —', noCategory: '— keine Kategorie —', noAccess: 'Kein Zugriff auf diesen Server.',
     welcome: 'Willkommen', welcomeDesc: 'Begrüßungs-Card für neue Member', welcomeMsg: 'Text über der Karte', welcomePlaceholders: 'Platzhalter: {user} {username} {server} {membercount}', ticketCategory: 'Kategorie für Tickets (leer = keine)',
     welcomeChannelLbl: 'Willkommens-Channel', leaveTitle: '👋 Verlassen / Goodbye', leaveChannelLbl: 'Verlassen-Channel', leaveMsg: 'Verlassen-Nachricht', ticketNamesLbl: 'Ticket-Channel-Namen (pro Typ)', ticketNameHint: 'Beispiel: "problem" → Channel heißt "problem-username"', tkTypes: 'Ticket-Typen', tkTypesHint: 'Emoji + Name pro Typ – Standard ist Problem/Hilfe/High-Team, aber frei wählbar.', tkLabel: 'Name', tkPing: 'Ping-Rolle', tkChName: 'Channel-Name', tkAdvanced: '⚙️ Erweitert', tkMax: 'Max. Tickets pro User', tkMaxHint: '0 = unbegrenzt. Mehr offene Tickets darf ein User nicht haben.', tkMode: 'Ticket-Modus', tkModeForm: 'Bewerbungs-Formular', tkModeNormal: 'Normales Ticket', tkModeHint: 'Normal = Ticket sofort auf. Formular = User füllt erst Fragen aus.', tkQuestions: '📝 Formular-Fragen', tkQuestionsHint: 'Bis zu 5 Fragen. Leere Felder werden ignoriert.', tkQ: 'Frage', tkShort: 'Kurze Antwort', tkLong: 'Lange Antwort', tkReq: 'Pflicht', tkAi: 'KI-Assistent', tkAiOn: 'KI hilft im Ticket, bis ein Teammitglied übernimmt', tkAiHint: '⚠️ Datenschutz: Ticket-Inhalte werden an eine externe KI (Groq) gesendet. Nur mit Einverständnis aktivieren.', tkTakeover: 'Übernahme-Nachricht (wenn Team schreibt)', tkTranscript: 'Ticket-Transkript per DM an den User (am Ende)',
-    partners: 'Unsere Partner', funcBtn: 'Funktionen', funcTitle: '📖 Funktionen & Befehle', funcIntro: 'Klick auf eine Funktion, um alle Befehle und Erklärungen zu sehen.', funcBack: '← Zurück zu den Server-Einstellungen', funcCmds: 'Befehle', funcEvents: 'Die Events im Detail',
+    partners: 'Unsere Partner', partnersEmpty: 'Noch keine Partner – bald hier zu sehen! 🤝', amPartner: 'Partner', amPartnerDesc: 'Partner erscheinen vorne auf der Startseite im Karussell.', amPartnerName: 'Name', amPartnerImg: 'Bild-URL', amPartnerLink: 'Link (Website/Discord)', amPartnerAdd: 'Partner hinzufügen', amPartnerList: 'Aktuelle Partner', amPartnerNone: 'Noch keine Partner.', voiceXpTitle: 'Voice-XP', voiceXpLbl: 'XP fürs Reden im Voice-Channel vergeben', voiceXpHint: 'User bekommen XP für die Zeit im Voice (5 XP/Min). AFK-Channel & getaubte User zählen nicht.', funcBtn: 'Funktionen', funcTitle: '📖 Funktionen & Befehle', funcIntro: 'Klick auf eine Funktion, um alle Befehle und Erklärungen zu sehen.', funcBack: '← Zurück zu den Server-Einstellungen', funcCmds: 'Befehle', funcEvents: 'Die Events im Detail',
     adminUpd: 'Update-Benachrichtigung', adminUpdDesc: 'Bot-Updates direkt in einen Channel bekommen', adminUpdChannel: 'Channel für Update-Posts', adminUpdRole: 'Rolle, die gepingt wird (optional)', adminUpdHint: 'Wird gepostet, sobald ein neues TitanBot-Update veröffentlicht wird.',
     amTitle: '🛠️ Admin-Menü', amBack: '← Zurück zur Server-Auswahl', amStats: 'Globale Statistik', amServers: 'Server', amMembers: 'Mitglieder', amCmds: 'Befehle heute', amChaos: 'Chaos-Events',
     amMaint: 'Wartungsmodus', amMaintOn: 'Wartung ist AN – normale User sind ausgesperrt', amMaintOff: 'Wartung ist AUS – alles läuft normal', amMaintToggle: 'Umschalten',
     amNews: '📣 Update veröffentlichen', amNewsDesc: 'Erscheint auf der Webseite UND wird an alle Server-Admins geschickt, die einen Update-Channel eingestellt haben.', amNewsTitle: 'Titel', amNewsAdded: '➕ Hinzugefügt (eine Zeile pro Punkt)', amNewsChanged: '✏️ Geändert', amNewsRemoved: '➖ Entfernt', amNewsSend: 'Veröffentlichen & senden', amNewsSent: 'Update veröffentlicht & an Admins gesendet ✅', amDynTitle: '🗑️ Veröffentlichte Updates', amDynDesc: 'Hier kannst du einzelne Updates wieder von der Webseite entfernen.', amDynItems: 'Punkte', amNoDyn: 'Noch keine eigenen Updates veröffentlicht.', amDynDelConfirm: 'Dieses Update wirklich löschen?',
-    settings: 'Einstellungen', premium: 'Premium', premLockNote: 'Diese Funktion gibt es mit Premium.', premLockLink: 'Premium holen', premFeatHelp: '👑 Premium-Funktionen', setTitle: '⚙️ Einstellungen', setBack: '← Zurück', setSessions: 'Aktive Sitzungen', setThisSession: 'Diese Sitzung', setActiveNow: 'gerade aktiv', setDevices: 'Geräte verwalten', setLogoutAll: 'Alle Geräte abmelden', setHistory: 'Login-Verlauf', setSoon: 'bald verfügbar', setPrem: 'Premium', setManagePrem: 'Premium verwalten', setInvoices: 'Rechnungen', setPayMethods: 'Zahlungsmethoden', setCancelSub: 'Abonnement kündigen', setCancelConfirm: 'Dein Premium wirklich beenden?', setNoInvoices: 'Keine Rechnungen vorhanden.', setNoPay: 'Keine Zahlungsmethode hinterlegt.', setNoPrem: 'Du hast aktuell kein Premium.', setPremUntil: 'Premium aktiv bis', setCancelled: 'Premium wurde beendet.',
+    settings: 'Einstellungen', premium: 'Premium', roleAdd: 'Rolle hinzufügen', agb: 'AGB', dsgvo: 'Datenschutz', premBuy: 'Jetzt kaufen', premPer: ' / 30 Tage', premHaveCode: 'Ich habe einen Code', premPayOk: 'Zahlung erfolgreich – Premium ist aktiv!', premPayFail: 'Zahlung konnte nicht bestätigt werden. Falls du bezahlt hast, melde dich beim Support.', premLockNote: 'Diese Funktion gibt es mit Premium.', premLockLink: 'Premium holen', premFeatHelp: '👑 Premium-Funktionen', setTitle: '⚙️ Einstellungen', setBack: '← Zurück', setSessions: 'Aktive Sitzungen', setThisSession: 'Diese Sitzung', setActiveNow: 'gerade aktiv', setDevices: 'Geräte verwalten', setLogoutAll: 'Alle Geräte abmelden', setHistory: 'Login-Verlauf', setSoon: 'bald verfügbar', setPrem: 'Premium', setManagePrem: 'Premium verwalten', setInvoices: 'Rechnungen', setPayMethods: 'Zahlungsmethoden', setCancelSub: 'Abonnement kündigen', setCancelConfirm: 'Dein Premium wirklich beenden?', setNoInvoices: 'Keine Rechnungen vorhanden.', setNoPay: 'Keine Zahlungsmethode hinterlegt.', setNoPrem: 'Du hast aktuell kein Premium.', setPremUntil: 'Premium aktiv bis', setCancelled: 'Premium wurde beendet.',
     premTitle: '👑 TitanBot Premium', premIntro: 'Unterstütze TitanBot und schalte exklusive Funktionen für deinen Server frei.', premActivate: 'Premium aktivieren', premBenefits: 'Alle Vorteile', premSoon: 'bald', premHave: 'Du hast bereits Premium! 🎉', premUntil: 'Läuft bis', premBack: '← Zurück', premCodeTitle: '🔑 Code einlösen', premCodeIntro: 'Gib deinen Premium-Code ein. Du musst mit Discord eingeloggt sein – dein Premium wird mit deiner Discord-ID verknüpft.', premCodeLbl: 'Premium-Code', premRedeemBtn: 'Einlösen', premNeedLogin: 'Bitte zuerst mit Discord einloggen.', premOk: 'Premium aktiviert! 🎉 Läuft', premBad: 'Ungültiger Code.', premUsed: 'Dieser Code wurde bereits benutzt.', premDeact: 'Dieser Code wurde deaktiviert.', premDays: 'Tage',
     amPrem: '👑 Premium-System', amPremGenT: 'Key generieren', amPremDays: 'Laufzeit (Tage)', amPremGen: 'Key erstellen', amPremNew: 'Neuer Key', amPremKeys: 'Premium-Keys', amPremNoKeys: 'Noch keine Keys.', amPremDeact: 'Deaktivieren', amPremUsedBy: 'benutzt von', amPremActiveSubs: 'Aktive Abos', amPremNoSubs: 'Keine aktiven Abos.', amPremExpires: 'läuft bis', amPremExtend: 'Verlängern', amPremRevoke: 'Entziehen', amPremGrant: 'Premium vergeben', amPremUserId: 'Discord-User-ID', amPremGrantBtn: 'Vergeben', amPremStatusOn: '✅ aktiv', amPremStatusDeact: '🚫 deaktiviert', amPremStatusUsed: '✔️ benutzt',
     amServerList: '🌐 Alle Server', amLeave: 'Verlassen', amLeaveConfirm: 'Wirklich diesen Server verlassen?', amAdmins: '👑 Admins verwalten', amAddAdmin: 'Admin hinzufügen (Discord-User-ID)', amAdd: 'Hinzufügen', amRemove: 'Entfernen', amOwner: 'Owner', amOwnerOnly: 'Nur der Owner kann Admins verwalten.', amYou: 'du',
     pxTitle: 'Gemeinsame Pixel-Leinwand', pxIntro: 'Alle 10 Minuten darfst du einen Pixel setzen. Zusammen entsteht ein Kunstwerk – am Ende gibt\'s das fertige Bild als PNG!', pxStartsIn: 'Event startet in', pxEndsIn: 'Event endet in', pxEnded: 'Event beendet! 🎉', pxDownload: '⬇️ Fertiges Bild als PNG', pxStartDate: 'Start', pxEndDate: 'Ende', pxPlaceHint: 'Farbe wählen, dann auf ein Feld klicken', pxWait: 'Nächster Pixel in', pxReady: '✅ Du kannst einen Pixel setzen!', pxTest: '🧪 Testmodus aktiv', pxPlaced: 'Pixel gesetzt! 🎉', pxDays: 'T', pxAmTitle: '🎨 Pixel-Leinwand', pxAmDesc: 'Zum Testen sofort starten (5-Sek-Cooldown). Reset stellt alles zurück & der Timer läuft wieder bis zum echten Start.', pxAmStart: '🧪 Test starten', pxAmReset: '♻️ Reset (Bild löschen)', pxAmResetConfirm: 'Leinwand wirklich komplett zurücksetzen?', pxAmState: 'Status', pxOpen: '🎨 Zur Pixel-Leinwand', pxBack: '← Zurück', pxZoomHint: 'Scrollen/Pinch zum Zoomen, ziehen zum Bewegen, klicken zum Setzen',
-    aiTitle: 'KI-Persönlichkeit', aiDesc: 'TitanBot mit echter KI – Chat, Tagebuch & Imitation', aiHint: '⚠️ Datenschutz: Bei aktivierter KI werden Nachrichten zur Verarbeitung an eine externe KI (Groq) gesendet. Aktiviere die Funktionen nur, wenn deine Mitglieder darüber informiert sind.', aiNoKey: '⚠️ Kein GROQ_API_KEY gesetzt – die KI ist deaktiviert, bis der Bot-Betreiber den Key hinterlegt.', aiChatLbl: '💬 Chat: TitanBot antwortet, wenn man ihn @erwähnt', aiChatCh: 'Chat nur in diesem Channel (leer = ganzer Server)', aiDiaryLbl: '📔 Tagebuch: täglicher Eintrag aus TitanBots Sicht', aiDiaryCh: 'Tagebuch-Channel', aiImitateLbl: '🎭 Imitation: /imitate ahmt den Stil eines Users nach', aiFun: 'Spaß-Modus (KI frotzelt bei Beleidigungen locker zurück)', aiFunHint: 'Nur Spaß & harmlos – nie wirklich verletzend. Bei echten Richtlinienverstößen bekommt der Bot-Besitzer automatisch eine DM mit Transkript.',
+    aiTitle: 'KI-Persönlichkeit', aiDesc: 'TitanBot mit echter KI – Chat, Tagebuch & Imitation', aiHint: '⚠️ Datenschutz: Bei aktivierter KI werden Nachrichten zur Verarbeitung an eine externe KI (Groq) gesendet. Aktiviere die Funktionen nur, wenn deine Mitglieder darüber informiert sind.', aiNoKey: '⚠️ Kein GROQ_API_KEY gesetzt – die KI ist deaktiviert, bis der Bot-Betreiber den Key hinterlegt.', aiChatLbl: '💬 Chat: TitanBot antwortet, wenn man ihn @erwähnt', aiChatCh: 'Chat nur in diesem Channel (leer = ganzer Server)', aiDiaryLbl: '📔 Tagebuch: täglicher Eintrag aus TitanBots Sicht', aiDiaryCh: 'Tagebuch-Channel', aiImitateLbl: '🎭 Imitation: /imitate ahmt den Stil eines Users nach', aiFun: 'Spaß-Modus (KI frotzelt bei Beleidigungen locker zurück)', warteraum: 'Warteraum', warteraumDesc: 'Nummeriert wartende User & pingt dein Team', warteraumHint: 'User im Warteraum-Voice werden automatisch mit [1], [2] … umbenannt (Reihenfolge). Beim Betreten wird dein Team einmalig gepingt. Der Bot braucht die Berechtigung Nicknamen-verwalten und muss in der Rollen-Hierarchie ueber den Usern stehen.', warteraumCh: 'Warteraum (Voice-Channel)', warteraumPingCh: 'Ping-Channel (Text)', warteraumPingRole: 'Ping-Rolle(n)', botLang: 'Sprachen', botLangDesc: 'Hauptsprache des Bots auf diesem Server', botLangHint: 'Stell hier ein, in welcher Sprache der Bot auf diesem Server schreibt & antwortet (KI-Chat, Tickets, Tagebuch usw.).', botLangMain: 'Hauptsprache', amPopup: 'Pop-Up', amPopupDesc: 'Zeig allen eingeloggten Usern einmalig ein Pop-Up im Dashboard. Nach dem Wegklicken kommt es pro User nicht wieder.', amPopupActive: 'Aktives Pop-Up', amPopupNone: 'Kein aktives Pop-Up.', amPopupTitle: 'Titel', amPopupMsg: 'Nachricht', amPopupPublish: 'Veröffentlichen', amPopupStop: 'Pop-Up deaktivieren', popupOk: 'Verstanden', amActivity: 'Dashboard-Aktivität', amOnlineNow: 'Jetzt online', amUsers24h: 'User (24h)', amUsers7d: 'User (7 Tage)', amUsersTotal: 'User gesamt', amLogins24h: 'Logins (24h)', amLogins7d: 'Logins (7 Tage)', amLoginsPerDay: 'Logins pro Tag (7 Tage)', aiFunHint: 'Nur Spaß & harmlos – nie wirklich verletzend. Bei echten Richtlinienverstößen bekommt der Bot-Besitzer automatisch eine DM mit Transkript.',
     tickets: 'Tickets', ticketsDesc: 'Panel-Channel wählen + Ticket-Logs', ticketsPanel: 'Panel-Channel (Panel wird beim Speichern hier gepostet)', ticketsLog: 'Log-Channel für Tickets',
     coords: 'Koordinaten', coordsDesc: 'Channel für /coords + Sticky-Nachricht',
     counting: 'Counting', countingDesc: 'Channel zum Hochzählen', countReset: 'Reset bei falscher Zahl', countNoDouble: 'Gleicher User nicht zweimal hintereinander',
@@ -114,7 +144,7 @@ const T = {
     mod: 'Mod-System', modDesc: '/warn /timeout /kick /ban – Log-Channel auswählen', modLog: 'Mod-Log-Channel',
     stats: 'Stats-Channel', statsDesc: 'Mitgliederzahl im Kanal-Namen (am besten ein Voice-Channel)', statsRole: 'Für welche Rolle? (leer = alle Mitglieder)', statsTpl: 'Vorlage ({count} = Zahl)',
     verify: 'Verify (Beta)', verifyDesc: 'Postet ein Verify-Panel mit Button – Klick gibt die Rolle', verifyRole: 'Verify-Rolle', verifyChannel: 'Panel-Channel (wird beim Speichern gepostet)',
-    rr: 'Button-Roles', rrDesc: 'Bot postet eine Nachricht mit Buttons – Klick gibt/entfernt die Rolle', rrTitle: 'Titel/Text', rrLabel: 'Button-Text', rrEmoji: 'Emoji (optional)', rrAdd: 'Panel posten', rrChannel: 'Channel',
+    rr: 'Button-Roles', rrDesc: 'Bot postet eine Nachricht mit Buttons – Klick gibt/entfernt die Rolle', rrTitle: 'Titel/Text', rrLabel: 'Button-Text', rrEmoji: 'Emoji (optional)', rrAdd: 'Panel posten', rrChannel: 'Channel', shop: 'Shop', shopDesc2: 'Coins gegen Rollen/Belohnungen eintauschen. User kaufen mit /shop.', shopEmpty: 'Noch keine Artikel im Shop.', shopItems: 'Aktuelle Artikel', shopAddNew: 'Neuen Artikel hinzufügen', shopName: 'Name', shopPrice: 'Preis (Coins)', shopRole: 'Rolle als Belohnung (optional)', shopDesc: 'Beschreibung (optional)', shopAdd: 'Artikel hinzufügen',
     chaos: 'Schicksals-Würfel', chaosDesc: 'Würfelt automatisch ein zufälliges Welt-Event für alle', chaosChannel: 'Ankündigungs-Channel', chaosTime: 'Uhrzeit', chaosInterval: 'Wie oft?', chaos24: 'Alle 24 Stunden', chaos12: 'Alle 12 Stunden', chaosEvents: 'Mögliche Events (Häkchen = aktiv)',
     mood2: 'Laune-System', mood2Desc: 'TitanBot hat Stimmungen – behandelt ihn gut, dann ist er großzügiger', moodChannel: 'Channel für Laune-Updates', moodThanks: 'Danke = +', moodInsult: 'Beleidigung = -', moodPet: '/titanbot pet = +', moodHint: 'Gut gelaunt: Belohnungen x1.5 · Sauer: x0.5 · Laune driftet langsam zur Mitte zurück.', moodGood: '😄 gut gelaunt', moodNeutral: '😐 neutral', moodBad: '😠 genervt',
     statsPage: 'Statistik', statsToday: 'Heute', statsWeek: '7 Tage', statsMonth: '30 Tage', statsAll: 'Gesamt', statsMessages: 'Nachrichten', statsTickets: 'Tickets', statsJoins: 'Beigetreten', statsLeaves: 'Verlassen', stats14: 'Nachrichten – letzte 14 Tage', statsMembersNow: 'Mitglieder', tour: 'Tour starten', tourSkip: 'Überspringen', tourNext: 'Weiter', tourDone: 'Fertig',
@@ -128,17 +158,17 @@ const T = {
     back: 'back', save: 'Save', saved: 'Saved!', noChannel: '— no channel —', noCategory: '— no category —', noAccess: 'No access to this server.',
     welcome: 'Welcome', welcomeDesc: 'Welcome card for new members', welcomeMsg: 'Text above the card', welcomePlaceholders: 'Placeholders: {user} {username} {server} {membercount}', ticketCategory: 'Category for tickets (empty = none)',
     welcomeChannelLbl: 'Welcome channel', leaveTitle: '👋 Leave / Goodbye', leaveChannelLbl: 'Leave channel', leaveMsg: 'Leave message', ticketNamesLbl: 'Ticket channel names (per type)', ticketNameHint: 'Example: "problem" → channel is named "problem-username"', tkTypes: 'Ticket types', tkTypesHint: 'Emoji + name per type – default is Problem/Help/High-Team, but fully customizable.', tkLabel: 'Name', tkPing: 'Ping role', tkChName: 'Channel name', tkAdvanced: '⚙️ Advanced', tkMax: 'Max tickets per user', tkMaxHint: '0 = unlimited. A user cannot have more open tickets.', tkMode: 'Ticket mode', tkModeForm: 'Application form', tkModeNormal: 'Normal ticket', tkModeHint: 'Normal = ticket opens directly. Form = user answers questions first.', tkQuestions: '📝 Form questions', tkQuestionsHint: 'Up to 5 questions. Empty fields are ignored.', tkQ: 'Question', tkShort: 'Short answer', tkLong: 'Long answer', tkReq: 'Required', tkAi: 'AI assistant', tkAiOn: 'AI helps in the ticket until a team member takes over', tkAiHint: '⚠️ Privacy: ticket content is sent to an external AI (Groq). Enable only with consent.', tkTakeover: 'Takeover message (when team writes)', tkTranscript: 'Ticket transcript via DM to the user (at the end)',
-    partners: 'Our partners', funcBtn: 'Functions', funcTitle: '📖 Functions & Commands', funcIntro: 'Click a function to see all its commands and explanations.', funcBack: '← Back to server settings', funcCmds: 'Commands', funcEvents: 'The events in detail',
+    partners: 'Our partners', partnersEmpty: 'No partners yet – coming soon! 🤝', amPartner: 'Partners', amPartnerDesc: 'Partners appear in the carousel on the front page.', amPartnerName: 'Name', amPartnerImg: 'Image URL', amPartnerLink: 'Link (website/Discord)', amPartnerAdd: 'Add partner', amPartnerList: 'Current partners', amPartnerNone: 'No partners yet.', voiceXpTitle: 'Voice XP', voiceXpLbl: 'Give XP for talking in voice channels', voiceXpHint: 'Users earn XP for time in voice (5 XP/min). AFK channel & deafened users don\'t count.', funcBtn: 'Functions', funcTitle: '📖 Functions & Commands', funcIntro: 'Click a function to see all its commands and explanations.', funcBack: '← Back to server settings', funcCmds: 'Commands', funcEvents: 'The events in detail',
     adminUpd: 'Update notification', adminUpdDesc: 'Get bot updates straight into a channel', adminUpdChannel: 'Channel for update posts', adminUpdRole: 'Role to ping (optional)', adminUpdHint: 'Posted whenever a new TitanBot update is published.',
     amTitle: '🛠️ Admin menu', amBack: '← Back to server selection', amStats: 'Global stats', amServers: 'Servers', amMembers: 'Members', amCmds: 'Commands today', amChaos: 'Chaos events',
     amMaint: 'Maintenance mode', amMaintOn: 'Maintenance is ON – normal users are locked out', amMaintOff: 'Maintenance is OFF – everything runs normally', amMaintToggle: 'Toggle',
     amNews: '📣 Publish update', amNewsDesc: 'Appears on the website AND is sent to all server admins who set an update channel.', amNewsTitle: 'Title', amNewsAdded: '➕ Added (one line per item)', amNewsChanged: '✏️ Changed', amNewsRemoved: '➖ Removed', amNewsSend: 'Publish & send', amNewsSent: 'Update published & sent to admins ✅', amDynTitle: '🗑️ Published updates', amDynDesc: 'Remove individual updates from the website here.', amDynItems: 'items', amNoDyn: 'No custom updates published yet.', amDynDelConfirm: 'Really delete this update?',
-    settings: 'Settings', premium: 'Premium', premLockNote: 'This feature is available with Premium.', premLockLink: 'Get premium', premFeatHelp: '👑 Premium features', setTitle: '⚙️ Settings', setBack: '← Back', setSessions: 'Active sessions', setThisSession: 'This session', setActiveNow: 'active now', setDevices: 'Manage devices', setLogoutAll: 'Log out all devices', setHistory: 'Login history', setSoon: 'coming soon', setPrem: 'Premium', setManagePrem: 'Manage premium', setInvoices: 'Invoices', setPayMethods: 'Payment methods', setCancelSub: 'Cancel subscription', setCancelConfirm: 'Really end your premium?', setNoInvoices: 'No invoices.', setNoPay: 'No payment method saved.', setNoPrem: 'You currently have no premium.', setPremUntil: 'Premium active until', setCancelled: 'Premium has been ended.',
+    settings: 'Settings', premium: 'Premium', roleAdd: 'Add role', agb: 'Terms', dsgvo: 'Privacy', premBuy: 'Buy now', premPer: ' / 30 days', premHaveCode: 'I have a code', premPayOk: 'Payment successful – premium is active!', premPayFail: 'Payment could not be confirmed. If you paid, contact support.', premLockNote: 'This feature is available with Premium.', premLockLink: 'Get premium', premFeatHelp: '👑 Premium features', setTitle: '⚙️ Settings', setBack: '← Back', setSessions: 'Active sessions', setThisSession: 'This session', setActiveNow: 'active now', setDevices: 'Manage devices', setLogoutAll: 'Log out all devices', setHistory: 'Login history', setSoon: 'coming soon', setPrem: 'Premium', setManagePrem: 'Manage premium', setInvoices: 'Invoices', setPayMethods: 'Payment methods', setCancelSub: 'Cancel subscription', setCancelConfirm: 'Really end your premium?', setNoInvoices: 'No invoices.', setNoPay: 'No payment method saved.', setNoPrem: 'You currently have no premium.', setPremUntil: 'Premium active until', setCancelled: 'Premium has been ended.',
     premTitle: '👑 TitanBot Premium', premIntro: 'Support TitanBot and unlock exclusive features for your server.', premActivate: 'Activate premium', premBenefits: 'All benefits', premSoon: 'soon', premHave: 'You already have premium! 🎉', premUntil: 'Active until', premBack: '← Back', premCodeTitle: '🔑 Redeem code', premCodeIntro: 'Enter your premium code. You must be logged in with Discord – your premium is linked to your Discord ID.', premCodeLbl: 'Premium code', premRedeemBtn: 'Redeem', premNeedLogin: 'Please log in with Discord first.', premOk: 'Premium activated! 🎉 Active', premBad: 'Invalid code.', premUsed: 'This code has already been used.', premDeact: 'This code has been deactivated.', premDays: 'days',
     amPrem: '👑 Premium system', amPremGenT: 'Generate key', amPremDays: 'Duration (days)', amPremGen: 'Create key', amPremNew: 'New key', amPremKeys: 'Premium keys', amPremNoKeys: 'No keys yet.', amPremDeact: 'Deactivate', amPremUsedBy: 'used by', amPremActiveSubs: 'Active subscriptions', amPremNoSubs: 'No active subscriptions.', amPremExpires: 'until', amPremExtend: 'Extend', amPremRevoke: 'Revoke', amPremGrant: 'Grant premium', amPremUserId: 'Discord user ID', amPremGrantBtn: 'Grant', amPremStatusOn: '✅ active', amPremStatusDeact: '🚫 deactivated', amPremStatusUsed: '✔️ used',
     amServerList: '🌐 All servers', amLeave: 'Leave', amLeaveConfirm: 'Really leave this server?', amAdmins: '👑 Manage admins', amAddAdmin: 'Add admin (Discord user ID)', amAdd: 'Add', amRemove: 'Remove', amOwner: 'Owner', amOwnerOnly: 'Only the owner can manage admins.', amYou: 'you',
     pxTitle: 'Shared pixel canvas', pxIntro: 'Every 10 minutes you may place one pixel. Together you create artwork – at the end you get the finished image as PNG!', pxStartsIn: 'Event starts in', pxEndsIn: 'Event ends in', pxEnded: 'Event finished! 🎉', pxDownload: '⬇️ Finished image as PNG', pxStartDate: 'Start', pxEndDate: 'End', pxPlaceHint: 'Pick a color, then click a cell', pxWait: 'Next pixel in', pxReady: '✅ You can place a pixel!', pxTest: '🧪 Test mode active', pxPlaced: 'Pixel placed! 🎉', pxDays: 'd', pxAmTitle: '🎨 Pixel canvas', pxAmDesc: 'Start now to test (5s cooldown). Reset clears everything & the timer counts to the real start again.', pxAmStart: '🧪 Start test', pxAmReset: '♻️ Reset (clear image)', pxAmResetConfirm: 'Really reset the whole canvas?', pxAmState: 'Status', pxOpen: '🎨 Open the pixel canvas', pxBack: '← Back', pxZoomHint: 'Scroll/pinch to zoom, drag to move, click to place',
-    aiTitle: 'AI personality', aiDesc: 'TitanBot with real AI – chat, diary & imitation', aiHint: '⚠️ Privacy: with AI enabled, messages are sent to an external AI (Groq) for processing. Only enable if your members are informed.', aiNoKey: '⚠️ No GROQ_API_KEY set – AI is disabled until the bot operator adds the key.', aiChatLbl: '💬 Chat: TitanBot replies when @mentioned', aiChatCh: 'Chat only in this channel (empty = whole server)', aiDiaryLbl: '📔 Diary: daily entry from TitanBot view', aiDiaryCh: 'Diary channel', aiImitateLbl: '🎭 Imitation: /imitate mimics a user style', aiFun: 'Fun mode (AI lightly roasts back when insulted)', aiFunHint: 'Just for fun & harmless – never truly hurtful. On real policy violations the bot owner automatically gets a DM with a transcript.',
+    aiTitle: 'AI personality', aiDesc: 'TitanBot with real AI – chat, diary & imitation', aiHint: '⚠️ Privacy: with AI enabled, messages are sent to an external AI (Groq) for processing. Only enable if your members are informed.', aiNoKey: '⚠️ No GROQ_API_KEY set – AI is disabled until the bot operator adds the key.', aiChatLbl: '💬 Chat: TitanBot replies when @mentioned', aiChatCh: 'Chat only in this channel (empty = whole server)', aiDiaryLbl: '📔 Diary: daily entry from TitanBot view', aiDiaryCh: 'Diary channel', aiImitateLbl: '🎭 Imitation: /imitate mimics a user style', aiFun: 'Fun mode (AI lightly roasts back when insulted)', warteraum: 'Waiting room', warteraumDesc: 'Numbers waiting users & pings your team', warteraumHint: 'Users in the waiting-room voice channel are auto-renamed [1], [2] … (queue order). Your team gets pinged once on join. The bot needs the Manage-Nicknames permission and must be above the users in the role hierarchy.', warteraumCh: 'Waiting room (voice channel)', warteraumPingCh: 'Ping channel (text)', warteraumPingRole: 'Ping role(s)', botLang: 'Languages', botLangDesc: 'Main language of the bot on this server', botLangHint: 'Set the language the bot writes & replies in on this server (AI chat, tickets, diary, etc.).', botLangMain: 'Main language', amPopup: 'Pop-up', amPopupDesc: 'Show all logged-in users a one-time pop-up in the dashboard. Once dismissed, it won\'t show again per user.', amPopupActive: 'Active pop-up', amPopupNone: 'No active pop-up.', amPopupTitle: 'Title', amPopupMsg: 'Message', amPopupPublish: 'Publish', amPopupStop: 'Disable pop-up', popupOk: 'Got it', amActivity: 'Dashboard activity', amOnlineNow: 'Online now', amUsers24h: 'Users (24h)', amUsers7d: 'Users (7 days)', amUsersTotal: 'Total users', amLogins24h: 'Logins (24h)', amLogins7d: 'Logins (7 days)', amLoginsPerDay: 'Logins per day (7 days)', aiFunHint: 'Just for fun & harmless – never truly hurtful. On real policy violations the bot owner automatically gets a DM with a transcript.',
     tickets: 'Tickets', ticketsDesc: 'Choose panel channel + ticket logs', ticketsPanel: 'Panel channel (panel gets posted here on save)', ticketsLog: 'Log channel for tickets',
     coords: 'Coordinates', coordsDesc: 'Channel for /coords + sticky message',
     counting: 'Counting', countingDesc: 'Channel to count up in', countReset: 'Reset on wrong number', countNoDouble: 'Same user can\'t count twice in a row',
@@ -159,7 +189,7 @@ const T = {
     mod: 'Mod system', modDesc: '/warn /timeout /kick /ban – choose log channel', modLog: 'Mod log channel',
     stats: 'Stats channel', statsDesc: 'Member count in channel name (ideally a voice channel)', statsRole: 'For which role? (empty = all members)', statsTpl: 'Template ({count} = number)',
     verify: 'Verify (Beta)', verifyDesc: 'Posts a verify panel with a button – click gives the role', verifyRole: 'Verify role', verifyChannel: 'Panel channel (posted on save)',
-    rr: 'Button roles', rrDesc: 'Bot posts a message with buttons – click gives/removes the role', rrTitle: 'Title/text', rrLabel: 'Button text', rrEmoji: 'Emoji (optional)', rrAdd: 'Post panel', rrChannel: 'Channel',
+    rr: 'Button roles', rrDesc: 'Bot posts a message with buttons – click gives/removes the role', rrTitle: 'Title/text', rrLabel: 'Button text', rrEmoji: 'Emoji (optional)', rrAdd: 'Post panel', rrChannel: 'Channel', shop: 'Shop', shopDesc2: 'Exchange coins for roles/rewards. Users buy with /shop.', shopEmpty: 'No items in the shop yet.', shopItems: 'Current items', shopAddNew: 'Add new item', shopName: 'Name', shopPrice: 'Price (coins)', shopRole: 'Reward role (optional)', shopDesc: 'Description (optional)', shopAdd: 'Add item',
     chaos: 'Dice of Fate', chaosDesc: 'Automatically rolls a random world event for everyone', chaosChannel: 'Announcement channel', chaosTime: 'Time', chaosInterval: 'How often?', chaos24: 'Every 24 hours', chaos12: 'Every 12 hours', chaosEvents: 'Possible events (checked = active)',
     mood2: 'Mood system', mood2Desc: 'TitanBot has moods – treat it well and it gets more generous', moodChannel: 'Channel for mood updates', moodThanks: 'Thanks = +', moodInsult: 'Insult = -', moodPet: '/titanbot pet = +', moodHint: 'Good mood: rewards x1.5 · Annoyed: x0.5 · Mood slowly drifts back to neutral.', moodGood: '😄 good mood', moodNeutral: '😐 neutral', moodBad: '😠 annoyed',
     statsPage: 'Statistics', statsToday: 'Today', statsWeek: '7 days', statsMonth: '30 days', statsAll: 'Total', statsMessages: 'Messages', statsTickets: 'Tickets', statsJoins: 'Joined', statsLeaves: 'Left', stats14: 'Messages – last 14 days', statsMembersNow: 'Members', tour: 'Start tour', tourSkip: 'Skip', tourNext: 'Next', tourDone: 'Done',
@@ -167,27 +197,23 @@ const T = {
 };
 const tr = (lang) => T[lang] || T.de;
 
-// ===== Partner (Bild + Discord-Link) – hier eintragen =====
-const PARTNERS = [
-  // Beispiel – bitte ersetzen:
-  // { name: 'Partner-Name', img: 'https://.../logo.png', url: 'https://discord.gg/xxxx' },
-];
+// ===== Partner: dynamisch aus den Settings (Admin-Menü) =====
 
 // ===== Premium-Vorteile (Deko – Funktionen kommen später) =====
 const PREMIUM_PERKS = [
   { e: '🚀', de: 'Früher Zugriff auf neue Funktionen (Beta)', en: 'Early access to new features (Beta)' },
   { e: '🎫', de: 'Ticket-Transkripte', en: 'Ticket transcripts' },
   { e: '👑', de: 'Premium-Badge im Dashboard', en: 'Premium badge in the dashboard' },
-  { e: '❤️‍🩹', de: 'Server Health Score', en: 'Server health score', soon: true },
-  { e: '🛡️', de: 'Raid-Warnsystem', en: 'Raid alert system', soon: true },
-  { e: '📈', de: 'Mitglieder-Prognose', en: 'Member growth forecast', soon: true },
-  { e: '💤', de: 'Inaktive User Erkennung', en: 'Inactive user detection', soon: true },
-  { e: '📅', de: 'Automatische Eventplanung', en: 'Automatic event planning', soon: true },
-  { e: '🎂', de: 'Geburtstagskalender', en: 'Birthday calendar', soon: true },
-  { e: '📝', de: 'Bewerbungs-System', en: 'Application system', soon: true },
-  { e: '👥', de: 'Team-Verwaltungs-System', en: 'Team management system', soon: true },
-  { e: '🗓️', de: 'Schicht-/Supportplaner', en: 'Shift / support planner', soon: true },
-  { e: '📊', de: 'Moderatoren-Leistungsstatistik', en: 'Moderator performance stats', soon: true },
+  { e: '❤️‍🩹', de: 'Server Health Score', en: 'Server health score' },
+  { e: '🛡️', de: 'Raid-Warnsystem', en: 'Raid alert system' },
+  { e: '📈', de: 'Mitglieder-Prognose', en: 'Member growth forecast' },
+  { e: '💤', de: 'Inaktive User Erkennung', en: 'Inactive user detection' },
+  { e: '📅', de: 'Automatische Eventplanung', en: 'Automatic event planning' },
+  { e: '🎂', de: 'Geburtstagskalender', en: 'Birthday calendar' },
+  { e: '📝', de: 'Bewerbungs-System', en: 'Application system' },
+  { e: '👥', de: 'Team-Verwaltungs-System', en: 'Team management system' },
+  { e: '🗓️', de: 'Schicht-/Supportplaner', en: 'Shift / support planner' },
+  { e: '📊', de: 'Moderatoren-Leistungsstatistik', en: 'Moderator performance stats' },
 ];
 
 // ===== Premium-Features (im Dashboard konfigurierbar, Funktion folgt) =====
@@ -357,9 +383,46 @@ function buildUpdates(lang, L) {
   }).join('');
 }
 function buildPartners(L) {
-  if (!PARTNERS.length) return '';
-  const cards = PARTNERS.map((p) => `<a class="pcard" href="${p.url}" target="_blank" rel="noopener">${p.img ? `<img src="${p.img}" alt="">` : ''}<b>${p.name}</b></a>`).join('');
-  return `<div class="partners"><h3>🤝 ${L.partners}</h3><div class="pgrid">${cards}</div></div>`;
+  const partners = getPartners();
+  if (!partners.length) {
+    return `<div class="partners"><h3>🤝 ${L.partners}</h3><div class="pcarousel-empty">${L.partnersEmpty}</div></div>`;
+  }
+  const esc = (s) => (s || '').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+  const slides = partners.map((p) => {
+    const src = p.local ? `/partner-img/${p.id}` : p.img;
+    const inner = `${src ? `<img src="${esc(src)}" alt="" referrerpolicy="no-referrer" onerror="this.style.display='none'">` : '<div class="pnoimg">🤝</div>'}<b>${esc(p.name)}</b>`;
+    return p.url
+      ? `<a class="pslide" href="${esc(p.url)}" target="_blank" rel="noopener">${inner}</a>`
+      : `<div class="pslide">${inner}</div>`;
+  }).join('');
+  const dots = partners.map((_, i) => `<button class="pdot${i === 0 ? ' on' : ''}" data-i="${i}" aria-label="Partner ${i + 1}"></button>`).join('');
+  const arrows = partners.length > 1
+    ? `<button class="parrow left" id="pprev" aria-label="prev">‹</button><button class="parrow right" id="pnext" aria-label="next">›</button>`
+    : '';
+  return `<div class="partners"><h3>🤝 ${L.partners}</h3>
+    <div class="pcarousel" id="pcarousel">
+      <div class="ptrack" id="ptrack">${slides}</div>
+      ${arrows}
+    </div>
+    ${partners.length > 1 ? `<div class="pdots" id="pdots">${dots}</div>` : ''}
+    <script>(function(){
+      var track=document.getElementById('ptrack');if(!track)return;
+      var slides=track.children,n=slides.length,i=0,timer=null;
+      var dots=document.querySelectorAll('#pdots .pdot');
+      function go(k){i=(k+n)%n;track.style.transform='translateX('+(-i*100)+'%)';for(var d=0;d<dots.length;d++)dots[d].classList.toggle('on',d===i);}
+      function next(){go(i+1);}function prev(){go(i-1);}
+      function reset(){if(timer)clearInterval(timer);timer=setInterval(next,10000);}
+      var pn=document.getElementById('pnext'),pp=document.getElementById('pprev');
+      if(pn)pn.onclick=function(){next();reset();};
+      if(pp)pp.onclick=function(){prev();reset();};
+      for(var d=0;d<dots.length;d++)dots[d].onclick=(function(k){return function(){go(k);reset();};})(d);
+      // Touch-Swipe
+      var sx=0,dx=0,sw=false;
+      track.addEventListener('touchstart',function(e){sx=e.touches[0].clientX;dx=0;sw=true;},{passive:true});
+      track.addEventListener('touchmove',function(e){if(sw)dx=e.touches[0].clientX-sx;},{passive:true});
+      track.addEventListener('touchend',function(){if(!sw)return;sw=false;if(Math.abs(dx)>40){if(dx<0)next();else prev();reset();}});
+      if(n>1)reset();
+    })();</script></div>`;
 }
 
 // Logging-Events gruppiert (alles in EINER Karte)
@@ -415,6 +478,8 @@ function layout(title, lang, body, opts) {
   })};</script>` : '';
   return `<!DOCTYPE html><html lang="${lang}"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>
+<link rel="icon" type="image/png" href="/favicon.png"><link rel="apple-touch-icon" href="/favicon.png">
+<meta property="og:title" content="TitanBot"><meta property="og:image" content="/favicon.png"><meta name="theme-color" content="#5865f2">
 <style>
   :root{--bg:#0e0f13;--card:#1a1d24;--line:#2a2e38;--text:#e8eaed;--muted:#9aa3b2;--accent:#5865f2;--accent2:#57f287}
   *{box-sizing:border-box}
@@ -512,6 +577,21 @@ function layout(title, lang, body, opts) {
   /* ---- Partner ---- */
   .partners{margin-top:30px;text-align:center}
   .partners h3{font-size:14px;text-transform:uppercase;letter-spacing:2px;color:var(--muted);margin-bottom:14px}
+  .pcarousel{position:relative;max-width:520px;margin:0 auto;overflow:hidden;border-radius:16px}
+  .ptrack{display:flex;transition:transform .5s cubic-bezier(.4,0,.2,1);will-change:transform}
+  .pslide{flex:0 0 100%;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:34px 24px;min-height:180px;background:var(--card);border:1px solid var(--line);border-radius:16px;text-decoration:none;color:var(--text)}
+  .pslide img{max-width:130px;max-height:100px;object-fit:contain;border-radius:12px}
+  .pslide b{font-size:19px}
+  .pslide:hover b{color:var(--accent)}
+  .pnoimg{font-size:52px}
+  .parrow{position:absolute;top:50%;transform:translateY(-50%);width:40px;height:40px;border-radius:50%;border:none;background:rgba(0,0,0,.45);color:#fff;font-size:24px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:.15s;z-index:2}
+  .parrow:hover{background:var(--accent)}
+  .parrow.left{left:8px}.parrow.right{right:8px}
+  .pdots{display:flex;gap:7px;justify-content:center;margin-top:12px}
+  .pdot{width:9px;height:9px;border-radius:50%;border:none;background:var(--line);cursor:pointer;padding:0;transition:.15s}
+  .pdot.on{background:var(--accent);width:22px;border-radius:6px}
+  .pcarousel-empty{max-width:520px;margin:0 auto;padding:26px;background:var(--card);border:1px dashed var(--line);border-radius:16px;color:var(--muted)}
+  @media(max-width:600px){.pcarousel{max-width:100%}.pslide{padding:26px 16px;min-height:150px}.pslide img{max-width:100px;max-height:80px}.parrow{width:34px;height:34px;font-size:20px}}
   .pgrid{display:flex;gap:14px;justify-content:center;flex-wrap:wrap}
   .pcard{display:flex;align-items:center;gap:12px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px 18px;transition:.15s}
   .pcard:hover{transform:translateY(-2px);border-color:var(--accent)}
@@ -563,6 +643,11 @@ function layout(title, lang, body, opts) {
   .premhero{text-align:center;background:linear-gradient(160deg,rgba(255,180,40,.12),rgba(255,140,20,.05));border:1px solid rgba(255,180,60,.3);border-radius:18px;padding:30px 20px;margin-top:8px}
   .premhero h1{margin:0 0 8px}
   .btn.prembig{display:inline-block;margin-top:16px;font-size:17px;padding:14px 30px;background:linear-gradient(135deg,#ffd35d,#ff9f1c);color:#3a2400;font-weight:800;box-shadow:0 6px 20px rgba(255,160,30,.45)}
+  .premprice{font-size:38px;font-weight:900;color:#ffd35d;margin:14px 0 4px}
+  .premprice span{font-size:15px;font-weight:600;color:var(--muted)}
+  .legal{max-width:760px;margin:0 auto;line-height:1.6}
+  .legal h2{margin-top:22px;font-size:18px}
+  .legal p{color:var(--text)}
   .btn.prembig:hover{transform:translateY(-2px)}
   .perkgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px;margin-top:14px}
   .perk{display:flex;align-items:center;gap:12px;background:var(--card);border:1px solid var(--line);border-radius:13px;padding:14px 16px}
@@ -585,6 +670,21 @@ function layout(title, lang, body, opts) {
   .qrow select{flex:none;width:140px}
   .qreq{display:inline-flex;align-items:center;gap:5px;font-size:13px;white-space:nowrap}
   .chk-lock{opacity:.65}
+  /* ---- Multi-Rollen-Picker ---- */
+  .rpicker{margin:4px 0 6px}
+  .rchips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px}
+  .rchips:empty{display:none}
+  .rchip{display:inline-flex;align-items:center;gap:6px;background:rgba(88,101,242,.16);border:1px solid rgba(88,101,242,.4);color:var(--text);border-radius:20px;padding:4px 6px 4px 12px;font-size:13px;font-weight:600}
+  .rchipx{border:none;background:rgba(255,255,255,.12);color:var(--text);width:18px;height:18px;border-radius:50%;cursor:pointer;font-size:14px;line-height:1;display:flex;align-items:center;justify-content:center;padding:0}
+  .rchipx:hover{background:#ed4245;color:#fff}
+  .raddsel{width:100%}
+  /* ---- Pop-Up ---- */
+  .popupov{position:fixed;inset:0;background:rgba(0,0,0,.65);display:flex;align-items:center;justify-content:center;z-index:200;padding:20px;backdrop-filter:blur(3px)}
+  .popupbox{background:var(--card);border:1px solid var(--line);border-radius:16px;max-width:440px;width:100%;padding:24px;box-shadow:0 20px 60px rgba(0,0,0,.5);animation:popin .25s ease}
+  @keyframes popin{from{transform:scale(.9);opacity:0}to{transform:scale(1);opacity:1}}
+  .popuph{font-size:20px;font-weight:800;margin-bottom:10px}
+  .popupm{color:var(--muted-strong,#c7cad1);line-height:1.5;margin-bottom:18px;white-space:normal}
+  .popupbox .btn{width:100%;justify-content:center}
   .chk{display:flex;align-items:center;gap:9px;margin-top:11px;font-size:14px}
   .chk input{width:17px;height:17px;accent-color:var(--accent)}
   label.lbl{display:block;margin:14px 0 6px;font-size:13px;color:var(--muted)}
@@ -794,6 +894,9 @@ window.toggleCard=function(el){var c=el.closest('.fcard');if(c)c.classList.toggl
   window.rowToggle=function(el){var r=el.closest('.frow');if(r)r.classList.toggle('off',!el.checked);};
 })();
 window.toggleUserMenu=function(e){e.stopPropagation();var m=e.currentTarget.parentNode;m.classList.toggle('open');};
+function rpSync(picker){var ids=[].map.call(picker.querySelectorAll('.rchip'),function(c){return c.getAttribute('data-id');});var inp=picker.querySelector('input[type=hidden]');inp.value=ids.join(',');inp.dispatchEvent(new Event('change',{bubbles:true}));}
+window.addChip=function(sel){var id=sel.value;if(!id)return;var picker=sel.closest('.rpicker');if(picker.querySelector('.rchip[data-id="'+id+'"]')){sel.value='';return;}var label=sel.options[sel.selectedIndex].textContent;var span=document.createElement('span');span.className='rchip';span.setAttribute('data-id',id);var x=document.createElement('button');x.type='button';x.className='rchipx';x.textContent='×';x.onclick=function(){window.rmChip(x);};span.textContent=label;span.appendChild(x);picker.querySelector('.rchips').appendChild(span);sel.value='';rpSync(picker);};
+window.rmChip=function(btn){var picker=btn.closest('.rpicker');btn.parentNode.remove();rpSync(picker);};
 document.addEventListener('click',function(){var o=document.querySelector('.usermenu.open');if(o)o.classList.remove('open');});
 (function(){
   var vault=document.getElementById('vault'),pb=document.getElementById('planetBtn');
@@ -854,10 +957,27 @@ function nav(user, lang, path, L) {
   const premium = (user && path === '/dashboard' && !isPremium(user.id)) ? `<a class="prembtn" href="/premium" title="${L.premium}">👑 Premium</a>` : '';
   const prem = user && isPremium(user.id);
   const userMenu = user
-    ? `<div class="usermenu"><button type="button" class="uname" onclick="toggleUserMenu(event)">${prem ? '<span class="prembadge">👑</span> ' : ''}${user.username} <span class="caret">▾</span></button><div class="udrop"><a href="/settings">⚙️ ${L.settings}</a><a href="/premium">👑 ${L.premium}</a><a href="/logout">🚪 ${L.logout}</a></div></div>`
+    ? `<div class="usermenu"><button type="button" class="uname" onclick="toggleUserMenu(event)">${prem ? '<span class="prembadge">👑</span> ' : ''}${user.username} <span class="caret">▾</span></button><div class="udrop"><a href="/settings">⚙️ ${L.settings}</a><a href="/premium">👑 ${L.premium}</a><a href="/agb">📄 ${L.agb}</a><a href="/dsgvo">🔒 ${L.dsgvo}</a><a href="/logout">🚪 ${L.logout}</a></div></div>`
     : '';
   const right = user ? `${premium}${flag}${discord}${userMenu}` : `${flag}${discord}`;
   return `<div class="nav"><a class="brand" href="/">Titan<span>Bot</span></a><div class="right">${right}</div></div>`;
+}
+
+function popupHtml(user, L) {
+  if (!user) return '';
+  const p = getPopup();
+  if (!p || hasSeenPopup(user.id)) return '';
+  const title = (p.title || '').replace(/</g, '&lt;');
+  const msg = (p.message || '').replace(/</g, '&lt;').replace(/\n/g, '<br>');
+  return `<div id="popupOverlay" class="popupov"><div class="popupbox">
+    <div class="popuph">📢 ${title}</div>
+    <div class="popupm">${msg}</div>
+    <button type="button" class="btn" onclick="dismissPopup()">${L.popupOk || 'Verstanden'}</button>
+  </div></div>
+  <script>
+  function dismissPopup(){var o=document.getElementById('popupOverlay');if(o)o.style.display='none';
+    fetch('/popup/dismiss',{method:'POST'}).catch(function(){});}
+  </script>`;
 }
 
 function sel(name, guild, selectedId, L) {
@@ -905,6 +1025,16 @@ function selRole(name, guild, selectedId, L) {
   return `<select name="${name}">${o}</select>`;
 }
 
+// Mehrfach-Rollen-Picker (Chips + "+"). selectedIds = Array von Rollen-IDs.
+function chipRoles(name, guild, selectedIds, L) {
+  const sel = (selectedIds || []).filter(Boolean);
+  const roles = [...guild.roles.cache.values()].filter((r) => r.id !== guild.id && !r.managed).sort((a, b) => b.position - a.position);
+  const nameOf = (id) => { const r = guild.roles.cache.get(id); return (r ? r.name : id).replace(/</g, '&lt;'); };
+  const chips = sel.map((id) => `<span class="rchip" data-id="${id}">@${nameOf(id)}<button type="button" class="rchipx" onclick="rmChip(this)">×</button></span>`).join('');
+  const opts = `<option value="">+ ${L.roleAdd}</option>` + roles.map((r) => `<option value="${r.id}">@${r.name.replace(/</g, '&lt;')}</option>`).join('');
+  return `<div class="rpicker"><div class="rchips">${chips}</div><select class="raddsel" onchange="addChip(this)">${opts}</select><input type="hidden" name="${name}" value="${sel.join(',')}"></div>`;
+}
+
 const NEW_KEYS = new Set(['autorole', 'tempvoice', 'announce', 'mod', 'stats', 'verify', 'chaos', 'mood']);
 // Karte MIT An/Aus-Schalter (greift Funktion aus, wenn aus)
 function fcard(key, emoji, title, desc, inner, gid) {
@@ -914,6 +1044,23 @@ function fcard(key, emoji, title, desc, inner, gid) {
     <div class="ctop"><div class="ctitle">${emoji} ${title}${badge}</div><label class="switch"><input type="checkbox" name="feat_${key}" ${on ? 'checked' : ''} onchange="toggleCard(this)"><span class="sl"></span></label></div>
     ${desc ? `<p class="cdesc">${desc}</p>` : ''}
     <div class="cbody">${inner}</div></div>`;
+}
+
+function shopSection(gid, guild, L) {
+  const items = getShop(gid);
+  let list = items.length ? '' : `<p class="muted">${L.shopEmpty}</p>`;
+  items.forEach((it) => {
+    const roleName = it.roleId ? (guild.roles.cache.get(it.roleId)?.name || 'Rolle') : null;
+    list += `<div class="srow"><div><b>${(it.name || '').replace(/</g, '&lt;')}</b> · 🪙 ${it.price}${roleName ? ` · 🎁 @${roleName.replace(/</g, '&lt;')}` : ''}${it.desc ? `<div class="muted" style="font-size:12px">${it.desc.replace(/</g, '&lt;')}</div>` : ''}</div>
+      <form method="POST" action="/dashboard/${gid}/shop/remove"><input type="hidden" name="id" value="${it.id}"><button class="btn danger" type="submit">${L.amRemove}</button></form></div>`;
+  });
+  const form = `<form method="POST" action="/dashboard/${gid}/shop/add" class="annadd">
+    <label class="lbl">${L.shopName}</label><input type="text" name="name" required maxlength="60">
+    <label class="lbl">${L.shopPrice}</label><input type="number" name="price" required min="0" value="100">
+    <label class="lbl">${L.shopRole}</label>${selRole('shoprole', guild, null, L)}
+    <label class="lbl">${L.shopDesc}</label><input type="text" name="desc" maxlength="120">
+    <button class="btn" type="submit">➕ ${L.shopAdd}</button></form>`;
+  return `<div class="updwrap"><div class="card"><div class="ctitle">🛒 ${L.shop}</div><p class="cdesc">${L.shopDesc2}</p><div class="logsub">${L.shopItems}</div>${list}<div class="logsub">${L.shopAddNew}</div>${form}</div></div>`;
 }
 
 function rrSection(gid, guild, L) {
@@ -961,6 +1108,10 @@ export function startWeb(client) {
   }));
   // Sprache
   app.use((req, res, next) => {
+    if (req.session.user) {
+      const now = Date.now();
+      if (!req.session._t || now - req.session._t > 60000) { req.session._t = now; try { touchDashSeen(req.session.user.id); } catch { /* egal */ } }
+    }
     if (req.query.lang === 'de' || req.query.lang === 'en') req.session.lang = req.query.lang;
     req.lang = req.session.lang || 'de';
     next();
@@ -989,82 +1140,17 @@ export function startWeb(client) {
   app.use((req, res, next) => {
     if (!getMaintenance()) return next();
     const p = req.path;
-    if (p.startsWith('/admin') || p === '/login' || p === '/callback' || p === '/logout' || p === '/api/stats' || p.endsWith('.png')) return next();
+    if (p.startsWith('/admin') || p === '/login' || p === '/callback' || p === '/logout' || p === '/api/stats' || p === '/agb' || p === '/dsgvo' || p.endsWith('.png')) return next();
     const u = reqUser(req);
     if (u && isAdmin(u.id)) return next();
     res.status(503).send(`<!DOCTYPE html><html lang="${req.lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Wartung</title><style>body{margin:0;height:100vh;display:flex;align-items:center;justify-content:center;background:#0b0d12;color:#e8eaf0;font-family:system-ui,Segoe UI,Roboto,sans-serif;text-align:center}div{max-width:420px;padding:24px}h1{font-size:54px;margin:0}</style></head><body><div><h1>🔧</h1><h2>Kurze Wartung</h2><p style="color:#9aa3b2">TitanBot wird gerade aktualisiert. Schau gleich nochmal vorbei!</p></div></body></html>`);
   });
 
   app.get('/logo.png', (req, res) => res.sendFile(path.join(__dirname, 'logo.png')));
+  app.get('/favicon.png', (req, res) => res.sendFile(path.join(__dirname, 'favicon.png')));
+  app.get('/favicon.ico', (req, res) => res.sendFile(path.join(__dirname, 'favicon.png')));
   app.get('/api/stats', (req, res) => res.json(getMetrics(client)));
 
-  // ---- Pixel-Leinwand ----
-  const canvasId = (req) => (req.session.user && req.session.user.id) || req.sessionID;
-  app.get('/canvas/state', (req, res) => { req.session.cv = true; res.json(Canvas.getState(canvasId(req))); });
-  app.post('/canvas/place', (req, res) => {
-    req.session.cv = true;
-    const r = Canvas.placePixel(canvasId(req), req.body.x, req.body.y, req.body.color);
-    res.status(r.ok ? 200 : 409).json(r);
-  });
-  app.get('/canvas/png', (req, res) => {
-    const ph = Canvas.getPhase();
-    if (ph.phase === 'before') return res.status(403).send('Event noch nicht gestartet.');
-    res.set('Content-Type', 'image/png');
-    res.set('Content-Disposition', 'attachment; filename="titanbot-pixelart.png"');
-    res.send(Canvas.renderPNG(6));
-  });
-
-  app.get('/canvas', (req, res) => {
-    const L = tr(req.lang);
-    const labels = JSON.stringify({ startsIn: L.pxStartsIn, endsIn: L.pxEndsIn, ended: L.pxEnded, download: L.pxDownload, startDate: L.pxStartDate, endDate: L.pxEndDate, wait: L.pxWait, ready: L.pxReady, test: L.pxTest, days: L.pxDays });
-    const body = `<div class="cvtop"><a class="btn ghost" href="/">${L.pxBack}</a><h1 style="margin:0;flex:1">🎨 ${L.pxTitle}</h1></div>
-      <div id="pxstatus" class="pxstatus">…</div>
-      <div id="pxcontrols"><button class="btn ghost" id="pxzoomout">➖</button><button class="btn ghost" id="pxzoomin">➕</button><button class="btn ghost" id="pxzoomreset">⟲</button><span class="muted" style="margin-left:8px">${L.pxZoomHint}</span></div>
-      <div id="pxview"><div id="pxpan"><canvas id="pxcanvas" width="128" height="128"></canvas></div><div id="pxgrid"></div></div>
-      <div id="pxpalette"></div>
-      <div id="pxcooldown" class="pxcd"></div>
-      <div id="pxdownload"></div>
-      <script>window.PXL=${labels};
-(function(){
-  var L=window.PXL||{};
-  var view=document.getElementById('pxview'),pan=document.getElementById('pxpan'),cv=document.getElementById('pxcanvas'),ctx=cv.getContext('2d');
-  var grid=document.getElementById('pxgrid');
-  var statusEl=document.getElementById('pxstatus'),palEl=document.getElementById('pxpalette'),cdEl=document.getElementById('pxcooldown'),dlEl=document.getElementById('pxdownload');
-  var W=128,H=128,palette=[],sel=5,state=null,cdRemain=0,phase='',offset=0;
-  var scale=1.4,px=0,py=0;
-  function updateGrid(){var vw=view.clientWidth,vh=view.clientHeight,sw=W*scale,sh=H*scale;grid.style.left=(vw/2+px-sw/2)+'px';grid.style.top=(vh/2+py-sh/2)+'px';grid.style.width=sw+'px';grid.style.height=sh+'px';grid.style.backgroundSize=scale+'px '+scale+'px';grid.style.display=(scale>=5)?'block':'none';}
-  function applyT(){pan.style.transform='translate('+px+'px,'+py+'px) scale('+scale+')';updateGrid();}
-  function p2(n){return(n<10?'0':'')+n;}
-  function fmt(ms){if(ms<0)ms=0;var x=Math.floor(ms/1000),d=Math.floor(x/86400);x-=d*86400;var h=Math.floor(x/3600);x-=h*3600;var m=Math.floor(x/60);x-=m*60;return(d>0?d+(L.days||'d')+' ':'')+p2(h)+':'+p2(m)+':'+p2(x);}
-  function draw(packed){cv.width=W;cv.height=H;cv.style.width=W+'px';cv.style.height=H+'px';cv.style.margin=(-H/2)+'px 0 0 '+(-W/2)+'px';var img=ctx.createImageData(W,H);for(var i=0;i<W*H;i++){var idx=parseInt(packed.charAt(i),16)||0;var hex=palette[idx]||'#ffffff';img.data[i*4]=parseInt(hex.substr(1,2),16);img.data[i*4+1]=parseInt(hex.substr(3,2),16);img.data[i*4+2]=parseInt(hex.substr(5,2),16);img.data[i*4+3]=255;}ctx.putImageData(img,0,0);}
-  function buildPalette(){palEl.innerHTML='';palette.forEach(function(hex,idx){var b=document.createElement('button');b.className='pxsw'+(idx===sel?' sel':'');b.style.background=hex;b.onclick=function(){sel=idx;buildPalette();};palEl.appendChild(b);});}
-  function tick(){if(!state)return;var now=Date.now()+offset;
-    if(state.test)statusEl.innerHTML='<b>'+(L.test||'Test')+'</b>';
-    else if(phase==='before')statusEl.innerHTML='<b>⏳ '+(L.startsIn||'')+': '+fmt(state.startsAt-now)+'</b><div class="muted">'+(L.startDate||'Start')+': 27.06.2026 13:00 · '+(L.endDate||'End')+': 11.07.2026 10:00</div>';
-    else if(phase==='live')statusEl.innerHTML='<b>🔴 '+(L.endsIn||'')+': '+fmt(state.endsAt-now)+'</b>';
-    else statusEl.innerHTML='<b>'+(L.ended||'')+'</b>';
-    if(phase==='live'){if(cdRemain>0){cdEl.textContent='⏱️ '+(L.wait||'')+': '+fmt(cdRemain);cdEl.className='pxcd wait';}else{cdEl.textContent=(L.ready||'');cdEl.className='pxcd ready';}}else cdEl.textContent='';
-    if(phase==='ended'&&!dlEl.innerHTML)dlEl.innerHTML='<a class="btn" href="/canvas/png">'+(L.download||'PNG')+'</a>';
-    view.style.opacity=(phase==='before')?'.5':'1';
-  }
-  function refresh(){fetch('/canvas/state').then(function(r){return r.json();}).then(function(s){state=s;phase=s.phase;W=s.w;H=s.h;palette=s.palette;offset=s.now-Date.now();draw(s.packed);buildPalette();cdRemain=s.cooldownRemaining;updateGrid();tick();}).catch(function(){});}
-  function place(clientX,clientY){if(phase!=='live'||cdRemain>0)return;var rect=cv.getBoundingClientRect();var x=Math.floor((clientX-rect.left)/rect.width*W),y=Math.floor((clientY-rect.top)/rect.height*H);if(x<0||y<0||x>=W||y>=H)return;
-    fetch('/canvas/place',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'x='+x+'&y='+y+'&color='+sel}).then(function(r){return r.json();}).then(function(res){if(res.ok){cdRemain=res.cooldownMs||600000;refresh();}else if(res.error==='cooldown'){cdRemain=res.cooldownRemaining||0;tick();}else refresh();}).catch(function(){});}
-  // Zoom-Buttons
-  function zoom(f){scale=Math.max(1,Math.min(20,scale*f));applyT();}
-  document.getElementById('pxzoomin').onclick=function(){zoom(1.3);};
-  document.getElementById('pxzoomout').onclick=function(){zoom(1/1.3);};
-  document.getElementById('pxzoomreset').onclick=function(){scale=1.4;px=0;py=0;applyT();};
-  view.addEventListener('wheel',function(e){e.preventDefault();zoom(e.deltaY<0?1.12:1/1.12);},{passive:false});
-  // Pan + Klick (Pointer)
-  var down=false,sx=0,sy=0,opx=0,opy=0,moved=false;
-  view.addEventListener('pointerdown',function(e){down=true;moved=false;sx=e.clientX;sy=e.clientY;opx=px;opy=py;view.setPointerCapture(e.pointerId);});
-  view.addEventListener('pointermove',function(e){if(!down)return;var dx=e.clientX-sx,dy=e.clientY-sy;if(Math.abs(dx)+Math.abs(dy)>6)moved=true;px=opx+dx;py=opy+dy;applyT();});
-  view.addEventListener('pointerup',function(e){if(down&&!moved)place(e.clientX,e.clientY);down=false;});
-  applyT();refresh();setInterval(refresh,5000);setInterval(function(){if(cdRemain>0)cdRemain-=250;tick();},250);
-})();</script>`;
-    res.send(layout('🎨 ' + L.pxTitle, req.lang, body));
-  });
 
   // ===================== PREMIUM =====================
   app.get('/premium', (req, res) => {
@@ -1073,11 +1159,61 @@ export function startWeb(client) {
     const perks = PREMIUM_PERKS.map((p) => `<div class="perk"><span class="pe">${p.e}</span><div><b>${p[req.lang] || p.de}</b>${p.soon ? ` <span class="soon">${L.premSoon}</span>` : ''}</div></div>`).join('');
     const have = user && isPremium(user.id)
       ? `<div class="ok">${L.premHave} ${L.premUntil}: <b>${new Date(getPremiumExpiry(user.id)).toLocaleDateString('de-DE')}</b></div>` : '';
+    const buyBtn = stripe
+      ? `<a class="btn prembig" href="/premium/buy">👑 ${L.premBuy} – 3,99 €</a>`
+      : '';
+    const priceLine = `<div class="premprice">3,99 €<span>${L.premPer}</span></div>`;
     const body = nav(user, req.lang, '/premium', L) +
       `<a class="muted" href="/dashboard">${L.premBack}</a>
-      <div class="premhero"><h1>${L.premTitle}</h1><p class="muted">${L.premIntro}</p>${have}<a class="btn prembig" href="/premium/redeem">${L.premActivate}</a></div>
+      <div class="premhero"><h1>${L.premTitle}</h1><p class="muted">${L.premIntro}</p>${priceLine}${have}${buyBtn}
+      <div style="margin-top:10px"><a class="muted" href="/premium/redeem">${L.premHaveCode}</a></div></div>
       <h2 style="text-align:center;margin-top:26px">${L.premBenefits}</h2>
       <div class="perkgrid">${perks}</div>`;
+    res.send(layout(L.premTitle, req.lang, body));
+  });
+
+  // ---- Stripe-Kauf ----
+  app.get('/premium/buy', async (req, res) => {
+    if (!req.session.user) return res.redirect('/login');
+    if (!stripe) return res.redirect('/premium/redeem');
+    try {
+      const s = await stripe.checkout.sessions.create({
+        mode: 'payment',
+        payment_method_types: ['card'],
+        line_items: [{
+          price_data: {
+            currency: 'eur',
+            product_data: { name: 'TitanBot Premium (30 Tage)' },
+            unit_amount: PREMIUM_PRICE_CENTS,
+          },
+          quantity: 1,
+        }],
+        metadata: { userId: req.session.user.id },
+        success_url: `${process.env.BASE_URL}/premium/success?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${process.env.BASE_URL}/premium`,
+      });
+      res.redirect(303, s.url);
+    } catch (e) {
+      console.error('Stripe-Fehler:', e?.message || e);
+      res.redirect('/premium?err=stripe');
+    }
+  });
+
+  app.get('/premium/success', async (req, res) => {
+    const L = tr(req.lang);
+    if (!req.session.user || !stripe) return res.redirect('/premium');
+    const sid = req.query.session_id;
+    let okMsg = `<div class="flash" style="border-left-color:#ed4245">${L.premPayFail}</div>`;
+    try {
+      const s = await stripe.checkout.sessions.retrieve(sid);
+      if (s && s.payment_status === 'paid') {
+        const uid = s.metadata?.userId || req.session.user.id;
+        if (!hasStripeSession(sid)) { grantPremium(uid, 30); markStripeSession(sid); }
+        okMsg = `<div class="ok">${L.premPayOk} 🎉 ${L.premUntil}: <b>${new Date(getPremiumExpiry(uid)).toLocaleDateString('de-DE')}</b></div>`;
+      }
+    } catch (e) { console.error('Stripe-Success-Fehler:', e?.message || e); }
+    const body = nav(req.session.user, req.lang, '/premium/success', L) +
+      `<div class="premhero"><h1>${L.premTitle}</h1>${okMsg}<a class="btn prembig" href="/dashboard">${L.premBack}</a></div>`;
     res.send(layout(L.premTitle, req.lang, body));
   });
 
@@ -1144,6 +1280,52 @@ export function startWeb(client) {
     revokePremium(req.session.user.id);
     res.redirect('/settings?cancelled=1');
   });
+
+  // ---- Rechtliches: AGB + Datenschutz ----
+  const legalPage = (title, bodyHtml, req, res) => {
+    const L = tr(req.lang);
+    const body = nav(req.session.user, req.lang, req.path, L) +
+      `<a class="muted" href="/">← ${L.premBack || 'Zurück'}</a><div class="legal"><h1>${title}</h1>${bodyHtml}</div>`;
+    res.send(layout(title, req.lang, body));
+  };
+
+  app.get('/agb', (req, res) => legalPage('📄 Allgemeine Geschäftsbedingungen (AGB)', `
+    <p class="muted">Stand: [Datum eintragen] · Anbieter: [Name / TitanDE.net] · Kontakt: [E-Mail]</p>
+    <h2>1. Geltungsbereich</h2>
+    <p>Diese AGB gelten für die Nutzung des Discord-Bots „TitanBot" und des zugehörigen Web-Dashboards. Mit der Nutzung erklärst du dich mit diesen Bedingungen einverstanden.</p>
+    <h2>2. Leistung</h2>
+    <p>TitanBot stellt Funktionen wie Tickets, Level, Economy, Giveaways, Übersetzer u.a. bereit. Ein Anspruch auf ständige Verfügbarkeit besteht nicht; der Dienst wird „wie besehen" angeboten.</p>
+    <h2>3. Premium</h2>
+    <p>Premium wird für 3,99 € für einen Zeitraum von 30 Tagen angeboten und ist an deine Discord-ID gebunden. Die Freischaltung erfolgt nach erfolgreicher Zahlung bzw. Code-Einlösung. Premium verlängert sich nicht automatisch.</p>
+    <h2>4. Widerruf / Rückerstattung</h2>
+    <p>Bei digitalen Inhalten kann das Widerrufsrecht erlöschen, sobald die Leistung vollständig erbracht wurde und du dem ausdrücklich zugestimmt hast. Kontaktiere uns bei Problemen: [E-Mail].</p>
+    <h2>5. Pflichten der Nutzer</h2>
+    <p>Du verpflichtest dich, den Bot nicht für rechtswidrige Zwecke zu missbrauchen und die Discord-Nutzungsbedingungen einzuhalten.</p>
+    <h2>6. Haftung</h2>
+    <p>Wir haften nicht für Schäden, die durch Ausfälle, Datenverlust oder Fehlfunktionen entstehen, soweit gesetzlich zulässig.</p>
+    <h2>7. Änderungen</h2>
+    <p>Diese AGB können angepasst werden. Die jeweils aktuelle Version ist hier einsehbar.</p>
+    <p class="muted" style="margin-top:20px"><b>Hinweis:</b> Dies ist eine Vorlage und keine Rechtsberatung. Bitte mit deinen echten Daten ausfüllen und im Zweifel rechtlich prüfen lassen.</p>
+  `, req, res));
+
+  app.get('/dsgvo', (req, res) => legalPage('🔒 Datenschutzerklärung (DSGVO)', `
+    <p class="muted">Stand: [Datum eintragen] · Verantwortlicher: [Name] · Kontakt: [E-Mail]</p>
+    <h2>1. Welche Daten wir verarbeiten</h2>
+    <p>Beim Login über Discord verarbeiten wir deine <b>Discord-User-ID</b>, deinen <b>Benutzernamen</b> und die Liste der Server, auf denen du Admin-Rechte hast. Für Bot-Funktionen speichern wir server- und nutzerbezogene Einstellungen (z.B. XP, Coins, Tickets).</p>
+    <h2>2. Zweck</h2>
+    <p>Die Daten werden ausschließlich zur Bereitstellung der Bot- und Dashboard-Funktionen genutzt.</p>
+    <h2>3. Rechtsgrundlage</h2>
+    <p>Die Verarbeitung erfolgt auf Grundlage von Art. 6 Abs. 1 lit. b und f DSGVO (Vertragserfüllung und berechtigtes Interesse an einem funktionierenden Dienst).</p>
+    <h2>4. KI-Funktionen</h2>
+    <p>Wenn KI-Funktionen aktiviert sind (z.B. KI-Chat, Ticket-Assistent, Übersetzer), werden die betroffenen Nachrichteninhalte zur Verarbeitung an einen externen KI-Anbieter (Groq) übermittelt. Aktiviere diese Funktionen nur mit Einverständnis der Betroffenen.</p>
+    <h2>5. Zahlungen</h2>
+    <p>Zahlungen werden über <b>Stripe</b> abgewickelt. Dabei gelten die Datenschutzbestimmungen von Stripe. Wir speichern keine Kreditkartendaten.</p>
+    <h2>6. Speicherdauer</h2>
+    <p>Daten werden gespeichert, solange sie für den Betrieb nötig sind. Auf Anfrage löschen wir deine Daten.</p>
+    <h2>7. Deine Rechte</h2>
+    <p>Du hast das Recht auf Auskunft, Berichtigung, Löschung und Widerspruch. Wende dich dazu an: [E-Mail].</p>
+    <p class="muted" style="margin-top:20px"><b>Hinweis:</b> Dies ist eine Vorlage und keine Rechtsberatung. Bitte mit deinen echten Daten ausfüllen und im Zweifel rechtlich prüfen lassen.</p>
+  `, req, res));
   app.get('/secret.png', (req, res) => res.sendFile(path.join(__dirname, 'secret.png')));
   app.get('/background2.png', (req, res) => res.sendFile(path.join(__dirname, 'background2.png')));
   app.get('/tempvoice.png', (req, res) => {
@@ -1160,26 +1342,10 @@ export function startWeb(client) {
         <p class="muted">${L.tagline}</p><br>
         <a class="btn" href="/login">${L.login}</a>
         <div class="tabs"><button class="btn ghost" onclick="showPanel('feats')">⚙️ ${L.features}</button><button class="btn ghost" onclick="showPanel('upds')">🆕 ${L.updates}</button></div>
-      </div>
-      <div id="feats" class="panel"><h2>⚙️ ${L.features}</h2><div class="featgrid">${buildFeatures(req.lang)}</div></div>
-      <div id="upds" class="panel"><h2>🆕 ${L.updates}</h2>${buildUpdates(req.lang, L)}</div>
-      <div id="pixelmini" class="panel" style="display:block;text-align:center">
-        <h2>🎨 ${L.pxTitle}</h2>
-        <p class="muted">${L.pxIntro}</p>
-        <div id="pxministatus" class="pxstatus">…</div>
-        <a class="btn" href="/canvas">${L.pxOpen} →</a>
-        <div id="pxminidl" style="margin-top:12px"></div>
-      </div>
-      <script>(function(){
-        var st=document.getElementById('pxministatus'),dl=document.getElementById('pxminidl');if(!st)return;
-        var L=${JSON.stringify({ startsIn: L.pxStartsIn, endsIn: L.pxEndsIn, ended: L.pxEnded, download: L.pxDownload, days: L.pxDays, test: L.pxTest })};
-        var s=null,off=0;function p2(n){return(n<10?'0':'')+n;}
-        function fmt(ms){if(ms<0)ms=0;var x=Math.floor(ms/1000),d=Math.floor(x/86400);x-=d*86400;var h=Math.floor(x/3600);x-=h*3600;var m=Math.floor(x/60);x-=m*60;return(d>0?d+(L.days||'d')+' ':'')+p2(h)+':'+p2(m)+':'+p2(x);}
-        function tick(){if(!s)return;var now=Date.now()+off;if(s.test){st.innerHTML='<b>'+(L.test||'Test')+'</b>';}else if(s.phase==='before'){st.innerHTML='<b>⏳ '+(L.startsIn||'Starts in')+': '+fmt(s.startsAt-now)+'</b><div class="muted">27.06.2026 13:00 → 11.07.2026 10:00</div>';}else if(s.phase==='live'){st.innerHTML='<b>🔴 '+(L.endsIn||'Ends in')+': '+fmt(s.endsAt-now)+'</b>';}else{st.innerHTML='<b>'+(L.ended||'Ended')+'</b>';dl.innerHTML='<a class="btn" href="/canvas/png">'+(L.download||'PNG')+'</a>';}}
-        function load(){fetch('/canvas/state').then(function(r){return r.json();}).then(function(d){s=d;off=d.now-Date.now();tick();}).catch(function(){});}
-        load();setInterval(load,10000);setInterval(tick,1000);
-      })();</script>` +
-      buildPartners(L), { tour: true }));
+      </div>` +
+      buildPartners(L) +
+      `<div id="feats" class="panel"><h2>⚙️ ${L.features}</h2><div class="featgrid">${buildFeatures(req.lang)}</div></div>
+      <div id="upds" class="panel"><h2>🆕 ${L.updates}</h2>${buildUpdates(req.lang, L)}</div>`, { tour: true }));
   });
 
   app.get('/login', (req, res) => {
@@ -1203,6 +1369,7 @@ export function startWeb(client) {
       req.session.user = { id: user.id, username: user.username };
       req.session.guilds = (Array.isArray(guilds) ? guilds : []).filter((g) => g.owner || canManage(g.permissions)).map((g) => ({ id: g.id, name: g.name, icon: g.icon }));
       delete req.session.state;
+      try { recordDashLogin(user.id); } catch { /* egal */ }
       res.redirect('/dashboard');
     } catch (e) { console.error('OAuth Fehler:', e); res.status(500).send('Fehler beim Login. <a href="/login">Nochmal</a>'); }
   });
@@ -1237,7 +1404,7 @@ export function startWeb(client) {
     if (!cards) cards = `<div class="card muted">${L.noServers}</div>`;
     const heading = dr ? '🔵 Drownie – Funktionen' : L.yourServers;
     const gear = isAdmin(req.session.user.id) ? `<a id="adminGear" href="/admin" title="Admin-Menü">⚙️</a>` : '';
-    res.send(layout(heading, req.lang, nav(req.session.user, req.lang, '/dashboard', L) + `<h1>${heading}</h1>${cards}<div class="updwrap"><h2>🆕 ${L.updates}</h2>${buildUpdates(req.lang, L)}</div>` + hauptBtn(dr) + gear, { tour: true }));
+    res.send(layout(heading, req.lang, nav(req.session.user, req.lang, '/dashboard', L) + `<h1>${heading}</h1>${cards}<div class="updwrap"><h2>🆕 ${L.updates}</h2>${buildUpdates(req.lang, L)}</div>` + hauptBtn(dr) + gear + popupHtml(req.session.user, L), { tour: true }));
   });
 
   app.get('/dashboard/:id/stats', (req, res) => {
@@ -1278,6 +1445,15 @@ export function startWeb(client) {
     const P = (key, emoji, title, desc, inner, opts = {}) => feats.push({ key, emoji, title, desc, inner, noToggle: !!opts.noToggle, togName: opts.togName, togChecked: opts.togChecked, locked: !!opts.locked, prem: !!opts.prem });
     const userIsPrem = isPremium(req.session.user.id);
 
+    {
+      const cur = getBotLang(gid);
+      const opts = Object.entries(BOT_LANGS).map(([k, v]) => `<option value="${k}" ${cur === k ? 'selected' : ''}>${v}</option>`).join('');
+      P('botlang', '🌐', L.botLang, L.botLangDesc,
+        `<div class="ph">${L.botLangHint}</div>` +
+        `<label class="lbl">${L.botLangMain}</label><select name="bot_lang">${opts}</select>`,
+        { noToggle: true });
+    }
+
     P('welcome', '👋', L.welcome, L.welcomeDesc, welcomeBanner +
       `<label class="lbl">${L.welcomeChannelLbl}</label>` + sel('welcome', guild, getWelcomeChannel(gid), L) +
       `<label class="lbl">${L.welcomeMsg}</label><textarea name="welcomemsg">${getWelcomeMessage(gid).replace(/</g, '&lt;')}</textarea>` +
@@ -1310,7 +1486,7 @@ export function startWeb(client) {
           return `<div class="trow"><input type="text" name="temoji_${k}" value="${(m.emoji || '').replace(/"/g, '&quot;')}" class="temoji" maxlength="4">` +
             `<input type="text" name="tlabel_${k}" value="${(m.label || '').replace(/"/g, '&quot;')}" placeholder="${L.tkLabel}">` +
             `</div>` +
-            `<div class="trow2"><span class="muted">${L.tkPing}</span>` + selRole('trole_' + k, guild, getTicketRole(gid, k), L) +
+            `<div class="trow2"><span class="muted">${L.tkPing}</span>` + chipRoles('trole_' + k, guild, roleIds(getTicketRole(gid, k)), L) +
             `<span class="muted">${L.tkChName}</span><input type="text" name="tname_${k}" value="${getTicketName(gid, k).replace(/"/g, '&quot;')}"></div>`;
         }).join('') +
         `<div class="logsub">${L.tkAdvanced}</div>` +
@@ -1327,17 +1503,26 @@ export function startWeb(client) {
     P('coords', '📍', L.coords, L.coordsDesc, sel('coords', guild, getCoordsChannel(gid), L));
     P('counting', '🔢', L.counting, L.countingDesc, sel('counting', guild, getCountingChannel(gid), L) + chk('count_reset', co.resetOnFail, L.countReset) + chk('count_nodouble', co.noDouble, L.countNoDouble));
     P('link', '🛡️', L.link, '', chk('linkon', getLinkEnabled(gid), L.linkActive) + `<label class="lbl">${L.linkLog}</label>` + sel('linklog', guild, getLinkLogChannel(gid), L));
-    P('levels', '🎮', L.level, '', chk('levelup', getLevelupEnabled(gid), L.levelMsgs) + `<label class="lbl">${L.levelChannel}</label>` + sel('levelchannel', guild, getLevelupChannel(gid), L));
+    P('levels', '🎮', L.level, '', chk('levelup', getLevelupEnabled(gid), L.levelMsgs) + `<label class="lbl">${L.levelChannel}</label>` + sel('levelchannel', guild, getLevelupChannel(gid), L) + `<div class="logsub">🎤 ${L.voiceXpTitle}</div>` + chk('voice_xp', getVoiceXp(gid), L.voiceXpLbl) + `<div class="ph">${L.voiceXpHint}</div>`);
     P('economy', '🎰', L.casino, L.casinoDesc, `<p class="muted">${L.toggleNote}</p>`);
     P('voice', '🔊', L.voice2, L.voice2Desc, `<p class="muted">${L.toggleNote}</p>`);
-    P('autorole', '🎟️', L.autorole, L.autoroleDesc, selRole('autorole', guild, getAutoRole(gid), L));
+    P('autorole', '🎟️', L.autorole, L.autoroleDesc, chipRoles('autorole', guild, roleIds(getAutoRole(gid)), L));
+
+    {
+      const w = getWarteraum(gid) || {};
+      P('warteraum', '⏳', L.warteraum, L.warteraumDesc,
+        `<div class="ph">${L.warteraumHint}</div>` +
+        `<label class="lbl">${L.warteraumCh}</label>` + selVoice('wr_channel', guild, w.channelId || null, L) +
+        `<label class="lbl">${L.warteraumPingCh}</label>` + sel('wr_pingchannel', guild, w.pingChannelId || null, L) +
+        `<label class="lbl">${L.warteraumPingRole}</label>` + chipRoles('wr_pingrole', guild, roleIds(w.pingRole), L));
+    }
     P('tempvoice', '🎚️', L.tempvoice, L.tempvoiceDesc,
       `<label class="lbl">${L.tempvoiceDesc}</label>` + selVoice('tempvoicechannel', guild, getTempVoiceChannel(gid), L) +
       chk('tempvoicepanel', getTempVoicePanel(gid), L.tempvoicePanel));
     P('mod', '🛡️', L.mod, L.modDesc, `<label class="lbl">${L.modLog}</label>` + sel('modlog', guild, getModLogChannel(gid), L));
     P('stats', '📊', L.stats, L.statsDesc,
       `<label class="lbl">${L.stats}</label>` + selVoice('statschannel', guild, getStatsChannel(gid), L) +
-      `<label class="lbl">${L.statsRole}</label>` + selRole('statsrole', guild, getStatsRole(gid), L) +
+      `<label class="lbl">${L.statsRole}</label>` + chipRoles('statsrole', guild, roleIds(getStatsRole(gid)), L) +
       `<label class="lbl">${L.statsTpl}</label><input type="text" name="statstpl" value="${(getStatsTemplate(gid) || '').replace(/"/g, '&quot;')}" placeholder="Mitglieder: {count}">`);
     P('verify', '✅', L.verify, L.verifyDesc,
       `<label class="lbl">${L.verifyRole}</label>` + selRole('verifyrole', guild, getVerifyRole(gid), L) +
@@ -1380,7 +1565,7 @@ export function startWeb(client) {
       P('twitch', '🟣', L.twitch, L.twitchDesc, note +
         `<label class="lbl">${L.twitchUser}</label><input type="text" name="twitchlogin" value="${twLogin || ''}" placeholder="z.B. ninja">` + prev +
         `<label class="lbl">${L.twitchChannel}</label>` + sel('twitchchannel', guild, getTwitchChannel(gid), L) +
-        `<label class="lbl">${L.twitchRole}</label>` + selRole('twitchrole', guild, getTwitchRole(gid), L));
+        `<label class="lbl">${L.twitchRole}</label>` + chipRoles('twitchrole', guild, roleIds(getTwitchRole(gid)), L));
     }
     P('invite', '📨', L.invite, L.inviteDesc,
       `<label class="lbl">${L.inviteChannel}</label>` + sel('invitechannel', guild, getInviteChannel(gid), L) +
@@ -1389,7 +1574,7 @@ export function startWeb(client) {
     P('gtn', '🔮', L.gtn, L.gtnDesc, chk('gtnlock', getGtnLockOnWin(gid), L.gtnLock));
     P('freegame', '🎮', L.freegame, L.freegameDesc,
       `<label class="lbl">${L.twitchChannel}</label>` + sel('freegamechannel', guild, getFreeGameChannel(gid), L) +
-      `<label class="lbl">${L.freegameRole}</label>` + selRole('freegamerole', guild, getFreeGameRole(gid), L) +
+      `<label class="lbl">${L.freegameRole}</label>` + chipRoles('freegamerole', guild, roleIds(getFreeGameRole(gid)), L) +
       `<br><a class="btn test" href="/dashboard/${gid}/freegame-test">🧪 ${L.freegameTest}</a>`);
 
     // Logging
@@ -1404,7 +1589,7 @@ export function startWeb(client) {
 
     P('adminupdate', '🔔', L.adminUpd, L.adminUpdDesc,
       `<label class="lbl">${L.adminUpdChannel}</label>` + sel('adminupdchannel', guild, getAdminUpdateChannel(gid), L) +
-      `<label class="lbl">${L.adminUpdRole}</label>` + selRole('adminupdrole', guild, getAdminUpdateRole(gid), L) +
+      `<label class="lbl">${L.adminUpdRole}</label>` + chipRoles('adminupdrole', guild, roleIds(getAdminUpdateRole(gid)), L) +
       `<div class="ph">${L.adminUpdHint}</div>`, { noToggle: true });
 
     P('ai', '🤖', L.aiTitle, L.aiDesc,
@@ -1440,6 +1625,7 @@ export function startWeb(client) {
     const extras = [
       { key: 'announce', emoji: '📢', title: L.announce, desc: L.announceDesc, noToggle: false, panel: announceSection(gid, guild, L) },
       { key: 'rr', emoji: '🔘', title: L.rr, desc: L.rrDesc, noToggle: true, panel: rrSection(gid, guild, L) },
+      { key: 'shop', emoji: '🛒', title: L.shop, desc: L.shopDesc2, noToggle: false, panel: shopSection(gid, guild, L) },
     ];
 
     const menuRow = (m) => {
@@ -1497,8 +1683,18 @@ export function startWeb(client) {
   });
 
   // ===================== ADMIN-MENÜ =====================
-  app.get('/admin', requireAdmin, (req, res) => {
+  app.get('/admin', requireAdmin, async (req, res) => {
     const L = tr(req.lang);
+    // Usernames zu Discord-IDs auflösen (für die Anzeige)
+    const nameCache = new Map();
+    const resolveName = async (id) => {
+      if (!id) return null;
+      if (nameCache.has(id)) return nameCache.get(id);
+      let n = null;
+      try { const u = client.users.cache.get(id) || await client.users.fetch(id); n = u?.username || null; } catch { n = null; }
+      nameCache.set(id, n); return n;
+    };
+    const label = (name, id) => name ? `${name} <span class="muted">(${id})</span>` : `<span class="muted">${id}</span>`;
     const owner = isOwner(req.session.user.id);
     const m = getMetrics(client);
     const sent = req.query.sent ? `<div class="ok">✅ ${L.amNewsSent}</div>` : '';
@@ -1514,14 +1710,6 @@ export function startWeb(client) {
     const maintCard = `<div class="acard"><h2>🔧 ${L.amMaint}</h2>
       <p class="${maint ? 'mwarn' : 'muted'}">${maint ? L.amMaintOn : L.amMaintOff}</p>
       <form method="POST" action="/admin/maintenance"><button class="btn ${maint ? '' : 'danger'}" type="submit">${maint ? '✅ ' : '🔧 '}${L.amMaintToggle}</button></form></div>`;
-
-    const pxPhase = Canvas.getPhase();
-    const pxState = pxPhase.test ? `🧪 ${L.pxTest}` : pxPhase.phase === 'before' ? '⏳ before (' + new Date(pxPhase.startsAt).toLocaleString('de-DE') + ')' : pxPhase.phase === 'live' ? '🔴 live' : '🏁 ended';
-    const canvasCard = `<div class="acard"><h2>${L.pxAmTitle}</h2><p class="muted">${L.pxAmDesc}</p>
-      <p>${L.pxAmState}: <b>${pxState}</b></p>
-      <form method="POST" action="/admin/canvas/test" style="display:inline"><button class="btn" type="submit">${L.pxAmStart}</button></form>
-      <form method="POST" action="/admin/canvas/reset" style="display:inline;margin-left:8px" onsubmit="return confirm('${L.pxAmResetConfirm}')"><button class="btn danger" type="submit">${L.pxAmReset}</button></form>
-      <a class="btn ghost" href="/canvas/png" style="margin-left:8px">⬇️ PNG</a></div>`;
 
     const newsCard = `<div class="acard"><h2>${L.amNews}</h2><p class="muted">${L.amNewsDesc}</p>
       <form method="POST" action="/admin/news">
@@ -1545,20 +1733,21 @@ export function startWeb(client) {
     const keys = listPremiumKeys();
     const genKey = req.query.newkey ? `<div class="ok">${L.amPremNew}: <code>${req.query.newkey}</code></div>` : '';
     let keyRows = keys.length ? '' : `<p class="muted">${L.amPremNoKeys}</p>`;
-    keys.slice(0, 40).forEach((k) => {
+    for (const k of keys.slice(0, 40)) {
       const status = k.deactivated ? L.amPremStatusDeact : k.used ? L.amPremStatusUsed : L.amPremStatusOn;
       const del = (!k.used && !k.deactivated) ? `<form method="POST" action="/admin/premium/deactivate"><input type="hidden" name="code" value="${k.code}"><button class="btn danger" type="submit">${L.amPremDeact}</button></form>` : '';
-      keyRows += `<div class="srow"><div><code>${k.code}</code> <span class="muted">· ${k.days} ${L.premDays} · ${status}${k.usedBy ? ` · ${L.amPremUsedBy} ${k.usedBy}` : ''}</span></div>${del}</div>`;
-    });
+      const usedBy = k.usedBy ? ` · ${L.amPremUsedBy} ${label(await resolveName(k.usedBy), k.usedBy)}` : '';
+      keyRows += `<div class="srow"><div><code>${k.code}</code> <span class="muted">· ${k.days} ${L.premDays} · ${status}</span>${usedBy}</div>${del}</div>`;
+    }
     const subs = listPremiumSubs().filter((s) => s.expiresAt > Date.now());
     let subRows = subs.length ? '' : `<p class="muted">${L.amPremNoSubs}</p>`;
-    subs.forEach((s) => {
-      subRows += `<div class="srow"><div><b>${s.userId}</b><div class="muted">${L.amPremExpires} ${new Date(s.expiresAt).toLocaleDateString('de-DE')}</div></div>
+    for (const s of subs) {
+      subRows += `<div class="srow"><div><b>${label(await resolveName(s.userId), s.userId)}</b><div class="muted">${L.amPremExpires} ${new Date(s.expiresAt).toLocaleDateString('de-DE')}</div></div>
         <div style="display:flex;gap:6px;align-items:center">
           <form method="POST" action="/admin/premium/extend" style="display:flex;gap:4px"><input type="hidden" name="userId" value="${s.userId}"><input type="number" name="days" value="30" min="1" style="width:64px"><button class="btn" type="submit">${L.amPremExtend}</button></form>
           <form method="POST" action="/admin/premium/revoke"><input type="hidden" name="userId" value="${s.userId}"><button class="btn danger" type="submit">${L.amPremRevoke}</button></form>
         </div></div>`;
-    });
+    }
     const premCard = `<div class="acard"><h2>${L.amPrem}</h2>
       <div class="logsub">${L.amPremGenT}</div>${genKey}
       <form method="POST" action="/admin/premium/gen" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
@@ -1582,10 +1771,10 @@ export function startWeb(client) {
 
     let adminCard = '';
     if (owner) {
-      let alist = `<div class="srow"><div><b>${OWNER_ID}</b> 👑<div class="muted">${L.amOwner}${OWNER_ID === req.session.user.id ? ' · ' + L.amYou : ''}</div></div></div>`;
+      let alist = `<div class="srow"><div><b>${label(await resolveName(OWNER_ID), OWNER_ID)}</b> 👑<div class="muted">${L.amOwner}${OWNER_ID === req.session.user.id ? ' · ' + L.amYou : ''}</div></div></div>`;
       for (const aid of getAdmins()) {
         if (aid === OWNER_ID) continue;
-        alist += `<div class="srow"><div><b>${aid}</b><div class="muted">Admin${aid === req.session.user.id ? ' · ' + L.amYou : ''}</div></div>
+        alist += `<div class="srow"><div><b>${label(await resolveName(aid), aid)}</b><div class="muted">Admin${aid === req.session.user.id ? ' · ' + L.amYou : ''}</div></div>
           <form method="POST" action="/admin/admins/remove"><input type="hidden" name="id" value="${aid}"><button class="btn danger" type="submit">${L.amRemove}</button></form></div>`;
       }
       adminCard = `<div class="acard"><h2>${L.amAdmins}</h2>${alist}
@@ -1596,11 +1785,89 @@ export function startWeb(client) {
       adminCard = `<div class="acard"><h2>${L.amAdmins}</h2><p class="muted">${L.amOwnerOnly}</p></div>`;
     }
 
+    // Pop-Up-Verwaltung
+    const curPopup = getPopup();
+    const popupStatus = curPopup
+      ? `<div class="ok">${L.amPopupActive}: <b>${(curPopup.title || '—').replace(/</g, '&lt;')}</b></div>`
+      : `<p class="muted">${L.amPopupNone}</p>`;
+    const popupCard = `<div class="acard"><h2>📢 ${L.amPopup}</h2><p class="muted">${L.amPopupDesc}</p>${popupStatus}
+      <form method="POST" action="/admin/popup/set" style="margin-top:10px">
+        <label class="lbl">${L.amPopupTitle}</label><input type="text" name="title" maxlength="120" required value="${(curPopup?.title || '').replace(/"/g, '&quot;')}">
+        <label class="lbl">${L.amPopupMsg}</label><textarea name="message" maxlength="1500" required>${(curPopup?.message || '').replace(/</g, '&lt;')}</textarea>
+        <br><button class="btn" type="submit">📢 ${L.amPopupPublish}</button>
+      </form>
+      ${curPopup ? `<form method="POST" action="/admin/popup/clear" style="margin-top:8px"><button class="btn danger" type="submit">${L.amPopupStop}</button></form>` : ''}</div>`;
+
+    // Dashboard-Aktivität
+    const ds = getDashStats();
+    const dsBox = (n, l, ic) => `<div class="statbox"><span class="sn">${(n || 0).toLocaleString('de-DE')}</span><span class="sl">${ic} ${l}</span></div>`;
+    const dsChart = barChart(ds.perDay.map((d) => ({ label: (d.day || '').slice(5), value: d.count || 0 })));
+    const activityCard = `<div class="acard"><h2>📈 ${L.amActivity}</h2>
+      <div class="statgrid">
+        ${dsBox(ds.onlineNow, L.amOnlineNow, '🟢')}
+        ${dsBox(ds.users24h, L.amUsers24h, '👤')}
+        ${dsBox(ds.users7d, L.amUsers7d, '📅')}
+        ${dsBox(ds.totalUsers, L.amUsersTotal, '👥')}
+      </div>
+      <div class="ph">${L.amLogins24h}: <b>${ds.logins24h.toLocaleString('de-DE')}</b> · ${L.amLogins7d}: <b>${ds.logins7d.toLocaleString('de-DE')}</b></div>
+      <div class="chartwrap" style="margin-top:10px"><h3>${L.amLoginsPerDay}</h3>${dsChart}</div></div>`;
+
+    // Partner-Verwaltung
+    const partners = getPartners();
+    let pRows = partners.length ? '' : `<p class="muted">${L.amPartnerNone}</p>`;
+    partners.forEach((p) => {
+      pRows += `<div class="srow"><div style="display:flex;align-items:center;gap:10px">${(p.local || p.img) ? `<img src="${((p.local ? `/partner-img/${p.id}` : p.img) || '').replace(/"/g, '&quot;')}" referrerpolicy="no-referrer" style="width:34px;height:34px;object-fit:contain;border-radius:7px" onerror="this.style.display='none'">` : '🤝'}<div><b>${(p.name || '').replace(/</g, '&lt;')}</b><div class="muted" style="font-size:12px">${(p.url || '').replace(/</g, '&lt;')}</div></div></div>
+        <form method="POST" action="/admin/partner/remove"><input type="hidden" name="id" value="${p.id}"><button class="btn danger" type="submit">${L.amRemove}</button></form></div>`;
+    });
+    const partnerCard = `<div class="acard"><h2>🤝 ${L.amPartner}</h2><p class="muted">${L.amPartnerDesc}</p>
+      <form method="POST" action="/admin/partner/add" style="margin-top:10px">
+        <label class="lbl">${L.amPartnerName}</label><input type="text" name="name" required maxlength="60">
+        <label class="lbl">${L.amPartnerImg}</label><input type="text" name="img" placeholder="https://.../logo.png" maxlength="400">
+        <label class="lbl">${L.amPartnerLink}</label><input type="text" name="url" placeholder="https://discord.gg/... oder Website" maxlength="400">
+        <br><button class="btn" type="submit">➕ ${L.amPartnerAdd}</button></form>
+      <div class="logsub">${L.amPartnerList}</div>${pRows}</div>`;
+
     const body = nav(req.session.user, req.lang, '/admin', L) +
       `<a class="muted" href="/dashboard">${L.amBack}</a><h1>${L.amTitle}</h1>${sent}${left}` +
       `<div class="acard"><h2>📊 ${L.amStats}</h2>${statgrid}</div>` +
-      newsCard + updCard + premCard + maintCard + canvasCard + serverCard + adminCard;
+      activityCard + newsCard + updCard + popupCard + partnerCard + premCard + maintCard + serverCard + adminCard;
     res.send(layout(L.amTitle, req.lang, body));
+  });
+
+  app.post('/admin/partner/add', requireAdmin, async (req, res) => {
+    const name = (req.body.name || '').trim();
+    const img = (req.body.img || '').trim();
+    if (name) {
+      const p = addPartner({ name, img, url: (req.body.url || '').trim() });
+      if (img) await cachePartnerImage(p.id, img); // Bild lokal cachen (best effort)
+    }
+    res.redirect('/admin');
+  });
+  app.post('/admin/partner/remove', requireAdmin, (req, res) => {
+    const id = (req.body.id || '').trim();
+    removePartner(id);
+    if (/^p[a-z0-9]+$/i.test(id)) { try { fs.unlinkSync(path.join(PARTNER_DIR, id)); } catch { /* egal */ } }
+    res.redirect('/admin');
+  });
+  app.get('/partner-img/:id', (req, res) => {
+    const id = req.params.id;
+    if (!/^p[a-z0-9]+$/i.test(id)) return res.status(404).end();
+    const p = getPartners().find((x) => x.id === id);
+    const file = path.join(PARTNER_DIR, id);
+    if (!p || !p.local || !fs.existsSync(file)) return res.status(404).end();
+    res.type(p.imgType || 'image/png');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    fs.createReadStream(file).pipe(res);
+  });
+
+  app.post('/admin/popup/set', requireAdmin, (req, res) => {
+    if ((req.body.title || '').trim() && (req.body.message || '').trim()) setPopup(req.body.title.trim(), req.body.message.trim());
+    res.redirect('/admin');
+  });
+  app.post('/admin/popup/clear', requireAdmin, (req, res) => { clearPopup(); res.redirect('/admin'); });
+  app.post('/popup/dismiss', (req, res) => {
+    if (req.session.user) markPopupSeen(req.session.user.id);
+    res.json({ ok: true });
   });
 
   app.post('/admin/maintenance', requireAdmin, (req, res) => {
@@ -1608,7 +1875,6 @@ export function startWeb(client) {
     res.redirect('/admin');
   });
 
-  app.post('/admin/canvas/test', requireAdmin, (req, res) => { Canvas.adminStartTest(); res.redirect('/admin'); });
   app.post('/admin/updates/delete', requireAdmin, (req, res) => {
     const i = parseInt(req.body.index);
     if (Number.isInteger(i)) removeDynUpdate(i);
@@ -1631,7 +1897,6 @@ export function startWeb(client) {
     res.redirect('/admin');
   });
   app.post('/admin/premium/revoke', requireAdmin, (req, res) => { revokePremium((req.body.userId || '').trim()); res.redirect('/admin'); });
-  app.post('/admin/canvas/reset', requireAdmin, (req, res) => { Canvas.adminReset(); res.redirect('/admin'); });
 
   app.post('/admin/leave/:gid', requireAdmin, async (req, res) => {
     const L = tr(req.lang);
@@ -1675,9 +1940,9 @@ export function startWeb(client) {
         if (chId) {
           const ch = g.channels.cache.get(chId);
           if (ch) {
-            const roleId = getAdminUpdateRole(g.id);
-            const content = roleId ? `<@&${roleId}>` : '';
-            await ch.send({ content, embeds: [embed], allowedMentions: { roles: roleId ? [roleId] : [] } }).catch(() => {});
+            const rids = roleIds(getAdminUpdateRole(g.id));
+            const content = rids.map((r) => `<@&${r}>`).join(' ');
+            await ch.send({ content, embeds: [embed], allowedMentions: { roles: rids } }).catch(() => {});
           }
         } else {
           const owner = await g.fetchOwner().catch(() => null);
@@ -1699,6 +1964,22 @@ export function startWeb(client) {
     if (!ch) return res.redirect(`/dashboard/${gid}?fgtest=none`);
     await sendFreeGameTest(ch, getFreeGameRole(gid)).catch(() => {});
     res.redirect(`/dashboard/${gid}?fgtest=ok`);
+  });
+
+  app.post('/dashboard/:id/shop/add', (req, res) => {
+    if (!req.session.user) return res.redirect('/login');
+    const gid = req.params.id;
+    if (!(req.session.guilds || []).some((g) => g.id === gid)) return res.status(403).send('Kein Zugriff.');
+    const b = req.body;
+    if ((b.name || '').trim()) addShopItem(gid, { name: b.name.trim(), price: b.price, roleId: b.shoprole || null, desc: (b.desc || '').trim() });
+    res.redirect(`/dashboard/${gid}?saved=1`);
+  });
+  app.post('/dashboard/:id/shop/remove', (req, res) => {
+    if (!req.session.user) return res.redirect('/login');
+    const gid = req.params.id;
+    if (!(req.session.guilds || []).some((g) => g.id === gid)) return res.status(403).send('Kein Zugriff.');
+    removeShopItem(gid, (req.body.id || '').trim());
+    res.redirect(`/dashboard/${gid}?saved=1`);
   });
 
   app.post('/dashboard/:id/rr/add', async (req, res) => {
@@ -1747,6 +2028,7 @@ export function startWeb(client) {
   });
 
   async function applyGuildSettings(req, guild, gid, b) {
+    if (b.bot_lang) setBotLang(gid, b.bot_lang);
     setWelcomeChannel(gid, b.welcome || null);
     if (typeof b.welcomemsg === 'string') setWelcomeMessage(gid, b.welcomemsg.trim() || undefined);
     setLeaveChannel(gid, b.leavechannel || null);
@@ -1791,6 +2073,7 @@ export function startWeb(client) {
     setCountingChannel(gid, b.counting || null);
     setCountingOpts(gid, { resetOnFail: b.count_reset === 'on', noDouble: b.count_nodouble === 'on' });
     setLevelupEnabled(gid, b.levelup === 'on');
+    setVoiceXp(gid, b.voice_xp === 'on');
     setLevelupChannel(gid, b.levelchannel || null);
     setLogChannel(gid, b.logchannel || null);
     setLogEvents(gid, ALL_LOG_KEYS.filter((k) => b['log_' + k] === 'on'));
@@ -1811,6 +2094,7 @@ export function startWeb(client) {
     setTicketRole(gid, 'highteam', b.trole_highteam || null);
 
     setAutoRole(gid, b.autorole || null);
+    setWarteraum(gid, { channelId: b.wr_channel || null, pingChannelId: b.wr_pingchannel || null, pingRole: b.wr_pingrole || null });
     setTempVoiceChannel(gid, b.tempvoicechannel || null);
     setTempVoicePanel(gid, b.tempvoicepanel === 'on');
 
@@ -1862,7 +2146,7 @@ export function startWeb(client) {
       pet: Math.max(0, Math.min(50, parseInt(b.mood_pet) || 0)),
     });
 
-    ['welcome', 'tickets', 'coords', 'counting', 'link', 'levels', 'economy', 'voice', 'twitch', 'invite', 'gtn', 'freegame', 'logging', 'autorole', 'tempvoice', 'announce', 'mod', 'stats', 'verify', 'chaos', 'mood']
+    ['welcome', 'tickets', 'coords', 'counting', 'link', 'levels', 'economy', 'voice', 'twitch', 'invite', 'gtn', 'freegame', 'logging', 'autorole', 'tempvoice', 'announce', 'mod', 'stats', 'verify', 'chaos', 'mood', 'shop', 'warteraum']
       .forEach((k) => setFeatureEnabled(gid, k, b['feat_' + k] === 'on'));
 
     await chaosReconcile(guild);
